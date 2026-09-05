@@ -1,0 +1,50 @@
+[project]
+name = "repopilot"
+version = "0.1.0"
+description = "A controlled repository / coding agent: plan -> edit -> test -> retry -> diff."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "langgraph>=0.2.60",
+    "anthropic>=0.40",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repopilot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Belt and braces: makes pytest work even if the editable-install .pth is skipped
+# (see docs/failures.md - macOS UF_HIDDEN).
+pythonpath = ["src"]
+addopts = "-q"
+markers = ["slow: spawns subprocesses or runs the whole graph"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+# fixtures/ is the agent's *target* repo, not our source. It is meant to contain a bug.
+exclude = ["fixtures", ".workspaces"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = [
+    "B008",      # FastAPI's Depends() in defaults is the documented idiom
+    "ASYNC109",  # our own `timeout=` params are the public tool/sandbox contract
+]
