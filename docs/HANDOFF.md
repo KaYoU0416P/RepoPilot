@@ -38,7 +38,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
   `approvals`（审批流水）
 - 队列基于 `FOR UPDATE SKIP LOCKED` + **租约**（worker 崩了任务被别人接手，
   心跳续租，reaper 回收重试用尽的僵尸）
-- 9 状态的表驱动状态机 + 应用层守卫 + 数据库乐观锁
+- 8 状态的表驱动状态机 + 应用层守卫 + 数据库乐观锁
 - 两层限流（worker 并发 run 数 × 单 Agent 内工具并发）
 - `POST /runs` 只入队返回 202；审批端点；SSE；优雅停机
 

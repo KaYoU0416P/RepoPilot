@@ -17,7 +17,7 @@
 - **PostgreSQL 17 + pgvector**（`docker-compose.yml`，端口 5433，复用本机已有镜像）。
 - `db/schema.sql`：3 张表 —— `runs`（兼任队列）、`webhook_deliveries`（幂等台账）、
   `approvals`（审批流水）。用到 PG 独有的 ENUM 类型、`jsonb`、原生数组、**部分索引**。
-- `domain/status.py`：9 状态的状态机，流转表是唯一真相来源，终态从表推导。
+- `domain/status.py`：8 状态的状态机，流转表是唯一真相来源，终态从表推导。
 - `db/runs.py`：入队、**领取（租约 + SKIP LOCKED）**、心跳续租、僵尸回收、
   带乐观锁的状态流转。
 - `db/deliveries.py`：webhook 幂等去重。
@@ -34,7 +34,11 @@
 
 ## NOW
 
-**MCP server 完成。196 passed / 2 skipped，ruff 全绿。**
+**README 重写完成**，覆盖到 Stage C + MCP。顺带订正了一处事实错误：
+状态机是 **8 个状态**不是 9 个（`domain/status.py` 数得出来），
+README / progress / HANDOFF 三处都改了。这种数字面试官会数。
+
+### MCP server（196 passed / 2 skipped，ruff 全绿）
 
 - `mcp/protocol.py`：**手写 JSON-RPC 2.0**（报文解析、标准错误码、通知判定），
   不引 SDK。MCP 本身就是「JSON-RPC 2.0 + 一组约定方法名」。
@@ -115,10 +119,12 @@
    `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
 3. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
    **必须排在第 2 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
-4. **README 已落后三个 Stage**（还写着 118 passed、链路图停在 publishing，
-   没有 webhook / PR 发布 / 评测集 / MCP）。加简历项目描述。**优先级其实很高**：
-   现在别人打开这个仓库，看到的是三分之一的它。
-5. OpenTelemetry：每个节点、每个工具一个 span。
+4. **简历项目描述 + 面试 30 秒自述稿**。README 已经更新到位，但简历上那一段
+   还没写。素材全在 `docs/learning.md`。
+5. **`docs/HANDOFF.md` 已严重过期**：还写着「Stage A 完成，75 passed，3 个
+   commit」，Stage B / C / MCP 全没有。它是给下一个 Agent 的交接提示词，
+   过期的交接比没有交接更糟。
+6. OpenTelemetry：每个节点、每个工具一个 span。
 
 ## BLOCKED
 
