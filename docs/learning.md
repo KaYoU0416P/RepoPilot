@@ -423,6 +423,66 @@ SHA 就完全确定了。
 
 ---
 
+## MCP 到底是什么（别把它讲玄了）
+
+**MCP = JSON-RPC 2.0 + 一组约定好的方法名 + 一个传输层（通常是 stdio）。**
+没有魔法。手写一个 server 只有几十行，所以这个项目没引 SDK ——
+引了就说不清握手到底发生了什么。
+
+核心方法只有四个：`initialize`（握手，声明 capabilities）、`tools/list`、
+`tools/call`、`ping`。
+
+**JSON-RPC 2.0 的三种报文**，区分点只有一个：有没有 `id`。
+
+| 报文 | 长什么样 | 要回吗 |
+|---|---|---|
+| 请求 | `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` | 要 |
+| 响应 | `{"jsonrpc":"2.0","id":1,"result":{...}}` | — |
+| **通知** | `{"jsonrpc":"2.0","method":"notifications/initialized"}` | **绝对不能回** |
+
+回了通知，对端会收到一个它从没发过的响应，轻则报错重则连接乱掉。
+
+**Java 对照**：一个文本版的极简 RPC。和 gRPC/Dubbo 比，没有 IDL、没有代码生成、
+传输层可以是任何双向字节流。错误码那套（-32601 method not found 等）是协议规定的，
+别自己发明，客户端按码分支。
+
+### 四个必须说对的实现细节
+
+**1. stdout 是协议通道，日志必须走 stderr。**
+stdio 传输下 stdin/stdout 就是那根管子。往 stdout print 一行日志，对端收到的
+就是一条畸形报文。**这是 MCP stdio server 最经典的坑**，我为此给
+`setup_logging()` 加了 `stream` 参数。
+
+**2. 工具失败 ≠ RPC 失败。**
+`read_file` 读了个不存在的文件是**正常业务结果**，要回
+`result: {isError: true, content:[...]}`；只有「方法名不认识」「参数结构不对」
+才回 JSON-RPC error。**混淆这两层，模型就永远看不到工具的报错，也就没法改了重试。**
+这是整个 MCP 设计里最容易讲错的一点。
+
+**3. Schema 的真相来源是函数签名，不是手写的说明。**
+用 `inspect.signature` 拿类型注解和「有没有默认值」，自动生成 `inputSchema`。
+手写 Schema 一定会漂移 —— 函数加了个参数，Schema 忘了改，而这种 bug 只在模型
+调用时才暴露。
+
+**4. workspace 由服务端钉死，不让客户端指定。**
+让客户端传路径，等于把 `Workspace.resolve()` 的路径收敛整个绕过去。
+默认也只暴露 `risk="read"` 的工具 —— `run_tests` 会执行仓库里的代码，
+而 MCP 客户端是我们不控制的外部程序。
+
+### 这一层为什么这么薄（面试的落点）
+
+MCP server 里**一行业务逻辑都没有**。超时、并发上限、异常降级在 `ToolRegistry`，
+路径收敛在 `Workspace`。所以换一个协议入口，一行防护代码都不用重写。
+
+> 「工具的横切关注点当初就收敛在注册表里，不在各个调用点。
+> 结果是接 MCP 的时候，我只写了协议解析和 Schema 转换 ——
+> 安全和限流是白拿的。」
+
+这句话比「我实现了 MCP server」有价值得多：它讲的是**分层的回报**，
+而分层是后端岗真正在考的东西。
+
+---
+
 ## Why a coding agent needs a sandbox
 
 Three distinct risks, three distinct mitigations:

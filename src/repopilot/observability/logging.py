@@ -17,8 +17,15 @@ class _RunIdFilter(logging.Filter):
         return True
 
 
-def setup_logging(level: int = logging.INFO) -> None:
-    handler = logging.StreamHandler(sys.stdout)
+def setup_logging(level: int = logging.INFO, stream=None) -> None:
+    """装配根 logger。
+
+    `stream` 默认 stdout，但 **MCP server 必须传 sys.stderr**：
+    stdio 传输下 stdout 就是 JSON-RPC 的协议通道，往里写一行日志
+    就等于给对端发了一条畸形消息，连接直接废掉。
+    这是 MCP stdio server 最经典的坑，见 `mcp/server.py`。
+    """
+    handler = logging.StreamHandler(stream or sys.stdout)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)-5s [run=%(run_id)s] %(name)s | %(message)s")
     )

@@ -34,7 +34,26 @@
 
 ## NOW
 
-**Stage C — 评测基准集完成。170 passed / 2 skipped，ruff 全绿。**
+**MCP server 完成。196 passed / 2 skipped，ruff 全绿。**
+
+- `mcp/protocol.py`：**手写 JSON-RPC 2.0**（报文解析、标准错误码、通知判定），
+  不引 SDK。MCP 本身就是「JSON-RPC 2.0 + 一组约定方法名」。
+- `mcp/schema.py`：`ToolSpec` → MCP `inputSchema`。**真相来源是函数签名**
+  （`inspect.signature` 给类型和 required），说明字典只贡献 description ——
+  避免「函数加了参数、Schema 忘了改」的漂移。
+- `mcp/server.py`：initialize / ping / tools/list / tools/call / notifications。
+  `handle_message` 是「进字符串、出字符串」，协议层可以当纯函数测。
+- **这一层没有业务逻辑**：超时、并发上限、异常降级、路径收敛全在 ToolRegistry
+  和 Workspace 里。换协议入口不用重写任何防护。
+- 五个关键决定：日志走 stderr（stdout 是协议通道）；工具失败走 `result.isError`
+  而不是 RPC error（否则模型看不到报错）；默认只暴露 `risk="read"`；
+  workspace 服务端钉死；通知不回包。
+- `scripts/mcp_server.py` + `make mcp` / `make mcp-smoke`。
+  真实进程验证过：stdout 只有干净 JSON，路径逃逸被挡并以 isError 返回。
+- **又踩了一次 `.pth` UF_HIDDEN**：新建 `src/repopilot/mcp/` 让 uv 重装 editable
+  包，隐藏标志复发，脚本 import 失败。Makefile 目标一律依赖 `sync`。
+
+### Stage C — 评测基准集
 
 - `benchmarks/cases/` 15 个 seeded bug：单文件 5、跨文件 4、需要懂依赖语义 2、
   需要改测试 2、**故意无解 2**。每个 case 三份：`repo/`（Agent 看得到）、
@@ -96,9 +115,10 @@
    `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
 3. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
    **必须排在第 2 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
-4. MCP server，把 repo 工具暴露出去（要自己实现 Server，不是只接别人的）。
+4. **README 已落后三个 Stage**（还写着 118 passed、链路图停在 publishing，
+   没有 webhook / PR 发布 / 评测集 / MCP）。加简历项目描述。**优先级其实很高**：
+   现在别人打开这个仓库，看到的是三分之一的它。
 5. OpenTelemetry：每个节点、每个工具一个 span。
-6. README、架构图、简历项目描述。
 
 ## BLOCKED
 

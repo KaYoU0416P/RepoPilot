@@ -82,6 +82,7 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | `api/` | HTTP、DTO、SSE | LangGraph 内部、SQL |
 | `github/` | webhook 验签、事件解析、REST 客户端 | 数据库、FastAPI |
 | `publishing/` | 建分支、push、开 PR、回写评论 | 队列、状态机 |
+| `mcp/` | JSON-RPC 2.0、MCP 方法、Schema 转换 | 业务、Agent、数据库 |
 | `domain/` | 状态机 | 数据库、HTTP |
 | `db/` | 表结构、仓储、队列 SQL | Agent、工具 |
 | `worker/` | 领取循环、限流、租约、事件总线 | 具体在跑什么图 |
@@ -148,6 +149,32 @@ Agent 自己说成功不算数，必须有人看过 diff。
 **两种缺配置的处理为什么不一样**：webhook 验签缺密钥直接拒绝（fail closed），
 发布缺 token 降级继续。因为**验签是安全边界，发布是功能**。安全边界宁可不可用，
 功能宁可降级。这条区分要能主动讲。
+
+## MCP server
+
+把同样这 6 个工具通过 **MCP（stdio + JSON-RPC 2.0）** 暴露出去，任何 MCP 客户端
+（Claude Desktop / Claude Code）都能直接用。**协议是手写的**，没引 SDK ——
+MCP 本身就是「JSON-RPC 2.0 + 一组约定方法名」，几十行的事。
+
+```
+客户端 ──stdin──▶ MCPServer.handle_message      mcp/server.py
+                    ├─ initialize      握手，声明 capabilities
+                    ├─ tools/list      ToolSpec ──▶ JSON Schema（从函数签名生成）
+                    └─ tools/call      ToolRegistry.call(...)
+       ◀─stdout──  {"jsonrpc":"2.0","id":..,"result":..}
+```
+
+这一层**薄到没有业务逻辑**：超时、并发上限、异常降级、路径收敛全在
+`ToolRegistry` 和 `Workspace` 里。当初把横切关注点收敛进注册表，回报就在这里 ——
+换一个协议入口，一行防护代码都不用重写。
+
+| 决定 | 为什么 |
+|---|---|
+| 日志走 **stderr** | stdio 下 stdout 就是协议通道，写一行日志 = 发一条畸形报文 |
+| 工具失败走 `result.isError` | 不是 JSON-RPC error。否则模型看不到报错，没法改了重试 |
+| 默认只暴露 `risk="read"` | 客户端是外部的；`run_tests` 会执行仓库代码，要 `--allow-write` |
+| workspace 服务端钉死 | 让客户端指定路径 = 路径收敛被整个绕过去 |
+| 通知（无 `id`）不回包 | 回了对端会收到一个它没发过的响应 |
 
 ## 评测
 

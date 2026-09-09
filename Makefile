@@ -1,4 +1,4 @@
-.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check lint fmt run demo clean
+.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo clean
 
 # uv 在这台机器上写出来的 .pth 带 macOS UF_HIDDEN 标志，而 CPython 的 site.py
 # 会静默跳过隐藏的 .pth -> import repopilot 失败。详见 docs/failures.md。
@@ -61,6 +61,23 @@ run: sync db-up
 
 demo: sync
 	uv run python scripts/demo.py
+
+# MCP server（stdio）。手动起一般只是为了看它没崩 —— 正常用法是让
+# Claude Desktop / Claude Code 去 spawn 它，配置见 scripts/mcp_server.py 头注释。
+# 依赖 sync：新建源码文件会让 uv 重装 editable 包，.pth 的 UF_HIDDEN 会复发。
+mcp: sync
+	uv run --no-sync python scripts/mcp_server.py --repo $(or $(REPO),fixtures/sample_repo)
+
+# 不起客户端，直接打一轮 stdio 握手，确认协议没坏。
+mcp-smoke: sync
+	@printf '%s\n%s\n%s\n' \
+	  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+	  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+	  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+	| uv run --no-sync python scripts/mcp_server.py --repo fixtures/sample_repo 2>/dev/null \
+	| python3 -c 'import sys,json; ls=[l for l in sys.stdin.read().strip().split("\n") if l]; \
+	  assert len(ls)==2, "通知不该回包"; [json.loads(l) for l in ls]; \
+	  print("MCP stdio 握手正常：%d 行响应，stdout 未被日志污染" % len(ls))'
 
 clean:
 	rm -rf .workspaces .pytest_cache .ruff_cache
