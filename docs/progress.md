@@ -34,13 +34,26 @@
 
 ## NOW
 
-Stage A 收尾完成，等待推进 Stage B。
+**Stage B 第一步 — webhook 入口，完成。98 passed，ruff 全绿。**
+
+- `github/webhook.py`：验签 + 事件解析。刻意不碰数据库和 FastAPI，
+  输入 `bytes`/`dict`，输出布尔值和 `IssueTrigger` DTO，所以能当纯函数测。
+- `POST /webhooks/github`：raw body 验签 → 401 → 幂等登记 → 授权判断 → 入队。
+  `claim_delivery` 从"只有测试在用"变成真正接进链路。
+- `github_trigger_label` 授权边界：**默认不响应任何 Issue**，打了标签才算授权。
+- 密钥未配置时 **fail closed**（拒绝所有），不是"跳过验签"。
+- `verify_signature`：`hmac.compare_digest` 常数时间比较；比较前转 bytes，
+  否则攻击者塞一个非 ASCII 的签名头就能把 401 变成 500。
+- `client` fixture 从 test_api.py 提到 conftest.py，webhook 测试共用。
 
 ## NEXT
 
-1. **Stage B — GitHub 接入**：webhook 验签、Issue → 入队、开 PR、回写评论。
-   幂等台账已经就位，接上去即可。
-2. **Stage C — 评测集**：15 个 seeded bug（含跨文件、含故意无解的），出成功率报表。
+1. **Stage B 第二步**：clone 目标仓库（现在 webhook 入队时 `repo_path` 还是
+   写死的内置样例仓库）。
+2. **Stage B 第三步**：`publishing → published` —— 用 PAT push 分支、开 PR、
+   回写 Issue 评论（靠 `external_ref` 反查回哪个 Issue）。
+3. Docker sandbox：接了陌生仓库之后这条的优先级立刻升到最高。
+4. **Stage C — 评测集**：15 个 seeded bug（含跨文件、含故意无解的），出成功率报表。
 3. Docker sandbox 替换 `sandbox/local.py`（签名不变）。接了 GitHub 之后优先级上升，
    因为那时要跑陌生仓库的代码。
 4. MCP server，把 repo 工具暴露出去。
@@ -59,5 +72,9 @@ Stage A 收尾完成，等待推进 Stage B。
 - 队列空转靠轮询（默认 1s），不是零延迟。`LISTEN/NOTIFY` 可以解决。
 - sandbox 是本地子进程，不是容器。隔离靠路径收敛 + 超时，不是内核级。
 - API 没有鉴权。
-- `publishing → published` 这一步还没有真正的 PR 创建逻辑（Stage B）。
+- `publishing → published` 这一步还没有真正的 PR 创建逻辑（Stage B 第三步）。
+- webhook 的「登记投递」和「入队 run」**不在同一个事务里**。两者之间崩溃 →
+  投递已记账、run 没建成、重投会被判重，事件就丢了。两张表在同一个库，
+  技术上完全做得到一个事务，是刻意留的取舍。面试要主动讲这个缺口。
+- webhook 入队时 `repo_path` 还写死成内置样例仓库，没有真的 clone 目标仓库。
 - 评测只有单次运行，还没有任务基准集。

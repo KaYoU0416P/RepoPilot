@@ -56,8 +56,14 @@ class Settings(BaseSettings):
     enable_worker: bool = True
 
     # --- GitHub（Stage B）---
+    #: PAT。开 PR / 回写评论用，不碰 OAuth。
     github_token: str = ""
+    #: webhook 共享密钥。**留空 = 拒绝所有 webhook**（fail closed），
+    #: 不是"留空就跳过验签"。默认放行的开关是最典型的生产事故。
     github_webhook_secret: str = ""
+    #: Issue 打上这个标签才算授权 Agent 动手。默认不响应任何 Issue。
+    github_trigger_label: str = "repopilot"
+    github_api_url: str = "https://api.github.com"
 
 
 @lru_cache

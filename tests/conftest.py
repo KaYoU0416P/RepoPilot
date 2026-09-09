@@ -75,6 +75,30 @@ async def db():
         await close_pool()
 
 
+@pytest.fixture
+async def client(db, monkeypatch):
+    """走 ASGI transport 的 HTTP 客户端，不开端口、不起 uvicorn。
+
+    关掉 worker：否则它会把刚入队的任务领走，断言 status == 'queued' 就变成
+    竞态。测 HTTP 层就只测 HTTP 层。
+    """
+    import httpx
+
+    from repopilot.api.app import create_app
+    from repopilot.worker import EventBus
+
+    monkeypatch.setattr(get_settings(), "enable_worker", False)
+
+    app = create_app()
+    app.state.bus = EventBus()
+    app.state.worker = None
+    app.state.worker_task = None
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
 def pytest_collection_modifyitems(config, items):
     """数据库没起来时，把 db 相关用例标成 skip 而不是一片红。"""
     import socket

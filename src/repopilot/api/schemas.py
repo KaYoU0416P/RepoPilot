@@ -73,6 +73,20 @@ class RunResponse(BaseModel):
         )
 
 
+class WebhookResponse(BaseModel):
+    """webhook 的响应体。
+
+    注意所有分支都是 2xx —— 只要签名对、投递被受理，就算"我收到了"。
+    对 GitHub 返回 4xx/5xx 会触发重投，而"这个 Issue 没有 repopilot 标签"
+    并不是一个需要重投的错误。
+    """
+
+    status: Literal["queued", "duplicate", "ignored", "pong"]
+    detail: str = ""
+    run_id: UUID | None = None
+    external_ref: str | None = None
+
+
 class RunEvent(BaseModel):
     run_id: str
     seq: int

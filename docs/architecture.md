@@ -13,6 +13,13 @@
 ## 主调用链
 
 ```
+POST /webhooks/github         api/routes.py::github_webhook
+  ├─▶ verify_signature        对 raw bytes 做 HMAC-SHA256，常数时间比较
+  │                           失败 → 401，且**什么都不记账**
+  ├─▶ claim_delivery          X-GitHub-Delivery 当幂等键，重投直接 200
+  ├─▶ extract_issue_trigger   没打 repopilot 标签 → 忽略（仍返回 2xx）
+  └─▶ runs_repo.create_run    source='github_issue'，汇入下面同一条链路
+
 POST /runs                    api/routes.py::create_run
   └─▶ runs_repo.create_run    INSERT ... status='queued'，立刻返回 202
                               （HTTP 不等 Agent，Agent 可能跑几分钟）
@@ -63,6 +70,7 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | 模块 | 负责 | 不知道 |
 |---|---|---|
 | `api/` | HTTP、DTO、SSE | LangGraph 内部、SQL |
+| `github/` | webhook 验签、事件解析 | 数据库、FastAPI |
 | `domain/` | 状态机 | 数据库、HTTP |
 | `db/` | 表结构、仓储、队列 SQL | Agent、工具 |
 | `worker/` | 领取循环、限流、租约、事件总线 | 具体在跑什么图 |

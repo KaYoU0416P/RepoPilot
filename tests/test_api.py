@@ -2,33 +2,13 @@
 
 from uuid import UUID
 
-import httpx
 import pytest
 
-from repopilot.api.app import create_app
 from repopilot.db import runs as runs_repo
 from repopilot.domain import RunStatus
 
+# client fixture 在 conftest.py，webhook 测试也用它。
 pytestmark = pytest.mark.usefixtures("db")
-
-
-@pytest.fixture
-async def client(db, monkeypatch):
-    """API 单独测：关掉 worker，避免它把刚入队的任务领走，测试变得不确定。"""
-    from repopilot.config import get_settings
-
-    monkeypatch.setattr(get_settings(), "enable_worker", False)
-
-    app = create_app()
-    app.state.bus = __import__(
-        "repopilot.worker", fromlist=["EventBus"]
-    ).EventBus()
-    app.state.worker = None
-    app.state.worker_task = None
-
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 # ------------------------------------------------------------------ health

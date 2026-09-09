@@ -217,6 +217,46 @@ RETURNING delivery_id
 
 ---
 
+## Webhook 验签：三个必须说对的点
+
+**1. 必须对 raw bytes 验，不能对反序列化后的对象验。**
+JSON 反序列化再序列化不是恒等操作 —— key 顺序、空格、Unicode 转义都会变，
+签名必然对不上。所以路由签名是 `request: Request` + `await request.body()`，
+而不是 `body: dict`。**Java 对照**：Spring 里同一个坑，得用
+`ContentCachingRequestWrapper` 或 `@RequestBody String` 才能拿到原文。
+
+**2. 比较必须常数时间。**
+`==` 一发现某字节不同就返回，耗时泄露了「前面几位猜对了」。攻击者测量响应
+时间可以逐字节把签名试出来（timing attack）。用 `hmac.compare_digest`。
+**Java 对照**：`MessageDigest.isEqual(byte[], byte[])`，做支付回调验签用的
+就是它，绝不用 `String.equals`。
+
+**3. 密钥没配置要 fail closed。**
+`if not secret: return False`，而不是「没配就跳过验签」。默认放行的开关是最
+典型的生产事故：某次部署漏注入一个环境变量，接口就裸奔了且日志无异常。
+
+**加分细节**：`compare_digest` 传 `str` 时要求纯 ASCII，否则抛 `TypeError`。
+签名头是攻击者完全可控的，塞个中文进来就把 401 变成 500。所以比较前
+`.encode()` 成 bytes。「攻击者可控的输入不能有让服务端抛异常的路径」。
+
+---
+
+## 幂等和验签的先后顺序
+
+正确顺序是 **验签 → 记账 → 处理**，反过来是漏洞：先记账再验签，等于任何人
+不需要知道密钥就能往你的幂等台账里灌垃圾 delivery_id，之后 GitHub 真正的
+投递撞上这些 id 会被判成重复，事件直接被吞掉。
+
+**「忽略」要返回 2xx，不是 4xx。** 没打触发标签的 Issue 不是错误。返 4xx 会让
+GitHub 反复重投一个我们根本不想处理的事件，还会把 webhook 标成失败。
+只有「签名不对」和「请求本身畸形」才配 4xx。
+
+**已知缺口（要主动说）**：「登记投递」和「入队 run」不在同一个事务里。两者之间
+崩溃 → 投递已记账、run 没建成、重投被判重，事件丢了。两张表在同一个库，
+技术上一个事务就能解决，是刻意留的取舍。
+
+---
+
 ## Why a coding agent needs a sandbox
 
 Three distinct risks, three distinct mitigations:

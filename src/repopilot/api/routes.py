@@ -5,11 +5,12 @@
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from repopilot.api.schemas import (
@@ -19,13 +20,25 @@ from repopilot.api.schemas import (
     HealthResponse,
     RunEvent,
     RunResponse,
+    WebhookResponse,
 )
 from repopilot.config import Settings, get_settings
 from repopilot.db import approvals as approvals_repo
+from repopilot.db import deliveries as deliveries_repo
 from repopilot.db import runs as runs_repo
 from repopilot.db.models import RunRow
 from repopilot.domain import ACTIVE, InvalidTransition, RunStatus
+from repopilot.github import (
+    DELIVERY_HEADER,
+    EVENT_HEADER,
+    SIGNATURE_HEADER,
+    extract_issue_trigger,
+    verify_signature,
+)
+from repopilot.observability import get_logger
 from repopilot.worker import DONE, EventBus
+
+log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -121,6 +134,88 @@ async def decide_approval(run_id: UUID, body: ApprovalRequest) -> RunResponse:
 async def approval_history(run_id: UUID) -> list[dict]:
     await _require(run_id)
     return [a.model_dump(mode="json") for a in await approvals_repo.history(run_id)]
+
+
+# ----------------------------------------------------------------- webhook
+@router.post("/webhooks/github", response_model=WebhookResponse)
+async def github_webhook(
+    request: Request,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+) -> WebhookResponse:
+    """GitHub 事件入口。
+
+    顺序是有讲究的，每一步都不能提前也不能挪后：
+
+      1. 读 **raw bytes**    验签必须对原文做，反序列化过就废了
+      2. 验签                 没通过 → 401，且**什么都不记**。
+                              先记账再验签 = 任何人都能往你的台账里灌垃圾
+      3. 幂等登记             重投 → 直接 200，不重复干活
+      4. 解析 + 授权判断      没有 repopilot 标签 → 忽略（仍然 2xx）
+      5. 入队                 走已有的 create_run，后面一整条链路不用改
+
+    第 3 步之后失败会有个已知缺口：投递已登记但 run 没建成，重投也会被判重，
+    事件就丢了。工业级做法是把"登记 + 入队"放进同一个事务
+    （两张表在同一个库里，做得到）。这里没做，是刻意留的取舍 —— 见 progress.md。
+    """
+    body = await request.body()
+
+    # ---- 1 & 2：验签。fail closed —— 密钥没配就全拒。
+    if not verify_signature(
+        settings.github_webhook_secret, body, request.headers.get(SIGNATURE_HEADER)
+    ):
+        raise HTTPException(status_code=401, detail="签名校验失败")
+
+    delivery_id = request.headers.get(DELIVERY_HEADER)
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail=f"缺少 {DELIVERY_HEADER}")
+
+    event_type = request.headers.get(EVENT_HEADER, "")
+
+    try:
+        payload = json.loads(body or b"{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="请求体不是合法 JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体不是 JSON 对象")
+
+    # GitHub 配置 webhook 时先发一个 ping 探活，别把它记进台账。
+    if event_type == "ping":
+        return WebhookResponse(status="pong", detail="webhook 已连通")
+
+    # ---- 3：幂等。判重和登记是同一条 INSERT，天然原子。
+    is_new = await deliveries_repo.claim_delivery(
+        delivery_id, source="github", event_type=event_type, payload=payload
+    )
+    if not is_new:
+        return WebhookResponse(status="duplicate", detail=f"投递 {delivery_id} 已处理过")
+
+    # ---- 4：授权判断。默认不响应，打了标签才算授权。
+    if event_type != "issues":
+        return WebhookResponse(status="ignored", detail=f"不处理的事件类型: {event_type}")
+
+    trigger = extract_issue_trigger(payload, trigger_label=settings.github_trigger_label)
+    if trigger is None:
+        return WebhookResponse(
+            status="ignored", detail=f"未打 {settings.github_trigger_label} 标签或动作无关"
+        )
+
+    # ---- 5：入队。汇入和 POST /runs 完全相同的下游链路。
+    # 注意 repo_path 这里还是内置样例仓库 —— 真正 clone 目标仓库是 Stage B 第二步。
+    row = await runs_repo.create_run(
+        task=trigger.to_task(),
+        repo_path=str(settings.sample_repo),
+        source="github_issue",
+        external_ref=trigger.external_ref,
+        max_attempts=settings.max_attempts,
+    )
+    await deliveries_repo.attach_run(delivery_id, row.id)
+    log.info("webhook 入队: %s -> run %s", trigger.external_ref, row.id)
+
+    response.status_code = 202
+    return WebhookResponse(
+        status="queued", run_id=row.id, external_ref=trigger.external_ref
+    )
 
 
 # --------------------------------------------------------------------- SSE
