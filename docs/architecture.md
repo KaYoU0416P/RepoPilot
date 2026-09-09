@@ -1,86 +1,130 @@
-# RepoPilot Architecture
+# RepoPilot 架构
 
-## What it is
+## 是什么
 
-A controlled coding agent. You give it a task in natural language and a repository;
-it plans a change, edits files, runs the test suite in an isolated workspace, retries
-on failure within a budget, and returns a diff plus a machine-readable evaluation.
+一个受控的代码修复服务。任务进来 → Agent 在隔离副本里改代码 → 跑测试 →
+失败按预算重试 → **产物停在人工审批闸门** → 批准后才发布。
 
-The design constraint that shapes everything: **LLM-generated code must never run
-unsandboxed against the host repository.**
+两条设计主线，缺一不可：
 
-## Main call chain
+1. **不信任模型输出** —— LLM 生成的代码绝不在宿主机上无约束执行。
+2. **不信任进程活着** —— worker 崩了任务必须能被别人接手，靠租约不靠进程。
+
+## 主调用链
 
 ```
-POST /runs                      api/routes.py::create_run
-  -> RunService.start           api/service.py       asyncio.create_task, returns 202
-       -> WorkspaceManager.create   workspace/manager.py   copytree + git baseline commit
-       -> build_graph               agent/graph.py
-       -> graph.astream(state)      LangGraph
-            analyze    -> list_files, LLM -> Analysis
-            plan       -> read_file/search_code (asyncio.gather), LLM -> Plan
-            execute    -> read_file, LLM -> EditSet, write_file
-            run_tests  -> sandbox subprocess with timeout
-            evaluate   -> sets verdict: success | retry | failed
-              conditional edge: retry -> execute, else -> finish
-            finish     -> git_diff, final report
-       -> evaluate_run           evaluation/metrics.py
-  -> events pushed to per-run asyncio.Queue
-GET /runs/{id}/events           SSE, one `data:` frame per node completion
-GET /runs/{id}                  final RunResponse with diff + evaluation
+POST /runs                    api/routes.py::create_run
+  └─▶ runs_repo.create_run    INSERT ... status='queued'，立刻返回 202
+                              （HTTP 不等 Agent，Agent 可能跑几分钟）
+
+Worker.run_forever            worker/worker.py       ← 后台常驻
+  ├─▶ Semaphore.acquire       先占坑再去捞任务，没空位就不捞
+  ├─▶ runs_repo.claim_next_run    CLAIM_SQL: FOR UPDATE SKIP LOCKED + 租约
+  └─▶ Runner.execute          worker/runner.py
+        ├─▶ WorkspaceManager.create    copytree + git baseline commit
+        ├─▶ heartbeat_loop            后台续租，防止长任务被抢走
+        ├─▶ graph.astream             LangGraph
+        │     analyze   → list_files, LLM → Analysis
+        │     plan      → read_file/search_code（gather 并发）, LLM → Plan
+        │     execute   → read_file, LLM → EditSet, write_file
+        │     run_tests → sandbox 子进程，墙钟超时
+        │     evaluate  → verdict: success | retry | failed
+        │       条件边：retry → execute，否则 → finish
+        │     finish    → git_diff + 报告
+        ├─▶ evaluate_run              evaluation/metrics.py
+        └─▶ transition(PENDING_APPROVAL 或 FAILED)   ← 成功不等于结束
+
+POST /runs/{id}/approval      approvals_repo.decide
+  ├─▶ transition(PUBLISHING / REJECTED)   守卫 + 乐观锁
+  └─▶ INSERT approvals                    追加写，保留审批历史
+
+GET /runs/{id}/events         SSE，每个节点完成推一帧
+GET /runs/{id}                最终 diff + evaluation
 ```
 
-## Module responsibilities
+## 状态机
 
-| Module | Owns | Does not know about |
+```
+queued ──▶ running ──▶ pending_approval ──▶ publishing ──▶ published
+  │          │  │            │
+  │          │  └─▶ failed   └─▶ rejected
+  │          └─▶ queued（租约过期，退回队列）
+  └─▶ cancelled
+```
+
+`domain/status.py` 的 `TRANSITIONS` 是唯一真相来源；终态从表推导，不手写第二份清单。
+`test_status.py` 用 BFS 验证「每个活跃状态都能走到某个终态」，防止出现死角。
+
+**关键约束：`running` 不能直接到 `published`。** 这一条就是审批闸门存在的全部意义 ——
+Agent 自己说成功不算数，必须有人看过 diff。
+
+## 模块职责
+
+| 模块 | 负责 | 不知道 |
 |---|---|---|
-| `api/` | HTTP, DTOs, SSE, run lifecycle | LangGraph internals, prompts |
-| `agent/` | State, nodes, edges, prompts | HTTP, subprocesses |
-| `tools/` | Tool contract, registry, timeout + concurrency caps | The graph, the LLM |
-| `workspace/` | Per-run repo copy, path confinement | Tools, agent |
-| `sandbox/` | Process execution with hard timeout | What is being run |
-| `llm/` | Provider adapters, structured output | Tools, workspace |
-| `evaluation/` | Trajectory metrics | HTTP, LLM |
-| `observability/` | run_id context, log format | everything else |
+| `api/` | HTTP、DTO、SSE | LangGraph 内部、SQL |
+| `domain/` | 状态机 | 数据库、HTTP |
+| `db/` | 表结构、仓储、队列 SQL | Agent、工具 |
+| `worker/` | 领取循环、限流、租约、事件总线 | 具体在跑什么图 |
+| `agent/` | State、节点、边、提示词 | HTTP、子进程 |
+| `tools/` | 工具契约与注册表、超时与并发上限 | 图、LLM |
+| `workspace/` | 仓库副本、路径收敛 | 工具、Agent |
+| `sandbox/` | 带硬超时的进程执行 | 在跑什么 |
+| `llm/` | 供应商适配、结构化输出 | 工具、workspace |
+| `evaluation/` | 轨迹指标 | HTTP、LLM |
 
-Dependencies point one way: `api -> agent -> tools -> {workspace, sandbox}`.
-`llm` and `evaluation` are leaves.
+依赖单向：`api → worker → agent → tools → {workspace, sandbox}`；
+`db`、`domain`、`llm`、`evaluation` 是叶子。
 
-## Three layers of containment
+## 三层隔离
 
-1. **Workspace** — the agent operates on a `copytree` of the repo, never the original.
-2. **Path confinement** — every LLM-supplied path goes through `Workspace.resolve()`,
-   which rejects absolute paths, `..` traversal, and symlink escapes. Violations become
-   `ToolResult(ok=False)`, not exceptions that kill the run.
-3. **Process sandbox** — `sandbox/local.py` runs commands with no shell, a fixed cwd,
-   a wall-clock timeout, and `start_new_session=True` so a timeout kills the whole
-   process group rather than orphaning children.
-
-There is deliberately **no general `shell` tool**. The only execute-risk tool is
-`run_tests`, which runs a fixed pytest command line.
-
-## Budgets
-
-| Budget | Where | Default |
+| 风险 | 措施 | 代码位置 |
 |---|---|---|
-| Retries | `evaluate` node vs `max_retries` | 2 |
-| Tool timeout | `ToolRegistry.call` -> `asyncio.wait_for` | 20s |
-| Test timeout | `sandbox.run_command` | 60s |
-| Concurrent tools | `ToolRegistry._semaphore` | 4 |
-| Files per edit | `execute` node slice | 5 |
-| File read size | `read_file` vs `max_file_bytes` | 200KB |
+| 模型写到仓库外 | `Workspace.resolve()` 拒绝绝对路径、`..`、符号链接逃逸 | `workspace/manager.py` |
+| 生成的代码不终止 | 墙钟超时 + `os.killpg` 杀整个进程组 | `sandbox/local.py` |
+| 改坏真实仓库 | 全程操作 `copytree` 副本 | `workspace/manager.py` |
 
-## LLM providers
+**刻意没有通用 shell 工具**。唯一的执行类工具是 `run_tests`，命令行是写死的。
+有了 shell，上面所有限制都变成装饰品。
 
-`llm/build_llm()` returns either `AnthropicLLM` (structured output via forced tool use)
-or `ScriptedLLM`. **`ScriptedLLM` is a deterministic test double, not an agent** — it has
-a hardcoded rule table that only understands the bundled fixture repo. It exists so the
-whole graph can be tested offline with no tokens. If `ANTHROPIC_API_KEY` is unset,
-`get_settings()` falls back to it automatically.
+## 可靠性
 
-## Current status
+| 机制 | 做法 | 面试对照 |
+|---|---|---|
+| 任务不丢 | 落库后才返回 202，worker 异步领取 | MQ 的持久化 |
+| worker 崩了 | 租约到期，任务自动可被重新领取 | MQ 的 ack 超时重投 |
+| 长任务不被抢 | 心跳续租，失去所有权时续租失败 | 消费者续期 |
+| 无限重试 | `attempts < max_attempts` + reaper 标记失败 | 死信队列 |
+| 重复触发 | `webhook_deliveries` 唯一约束 | 幂等键 |
+| 并发写冲突 | `UPDATE ... WHERE status = 当前状态` | 乐观锁 / @Version |
+| 优雅停机 | 停止领新任务 → 等在跑的收尾 → 超时取消，靠租约回收 | 优雅下线 |
 
-Stage 1 (done): local workspace sandbox, in-memory run store, six tools, six nodes.
+## 预算与限流
 
-Not built yet: MCP server, Docker sandbox, OpenTelemetry traces, persistence.
-See `docs/progress.md`.
+| 预算 | 位置 | 默认 |
+|---|---|---|
+| 同时跑几个 Agent | `Worker._slots` Semaphore | 2 |
+| 单个 Agent 内工具并发 | `ToolRegistry._semaphore` | 4 |
+| Agent 重试 | `evaluate` 节点 vs `max_retries` | 2 |
+| 任务被领取次数 | `runs.max_attempts` | 3 |
+| 工具超时 | `asyncio.wait_for` | 20s |
+| 测试超时 | `sandbox.run_command` | 60s |
+| 租约 | `lease_seconds` | 120s |
+
+**注意后两个是乘的关系**：最坏情况同时有 `2 × 4 = 8` 个工具在跑。
+
+## LLM 供应商
+
+`llm/build_llm()` 返回 `AnthropicLLM`（强制 tool use 拿结构化输出）或 `ScriptedLLM`。
+
+> **`ScriptedLLM` 是确定性测试替身，不是 Agent。** 它有一张只认识内置样例仓库的
+> 硬编码规则表，存在的意义是让整个图能离线跑测试、不花 token。它「解决」的问题
+> 只证明流水线是通的，不证明模型聪明。没有 `ANTHROPIC_API_KEY` 时会自动降级到它。
+
+## 当前状态
+
+**已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
+worker 租约与限流、SSE、评测指标、75 个测试。
+
+**未完成**：GitHub 接入（Stage B）、评测基准集（Stage C）、Docker sandbox、
+MCP server、OpenTelemetry、API 鉴权。详见 `docs/progress.md`。

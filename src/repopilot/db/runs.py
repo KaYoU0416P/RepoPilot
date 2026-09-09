@@ -40,11 +40,36 @@ async def create_run(
 
 
 # ================================================================== 出队
-#: worker 领取任务的 SQL。**这是整个项目最值得你背下来的一段 SQL。**
-#: 契约见 tests/test_queue.py。写法见 docs/learning.md「PG 当队列用」。
+#: worker 领取任务的 SQL。$1 = worker_id, $2 = lease_seconds。
+#:
+#: 从里往外读：
+#:   内层 SELECT  选出一个「可领取」的任务：新任务(queued)，或者租约已过期的
+#:                僵尸任务(running 但 lease_expires_at < now())。
+#:   SKIP LOCKED  跳过已被别的 worker 锁住的行。不加 → 排队等锁退化成串行；
+#:                连 FOR UPDATE 都不加 → 多个 worker 读到同一行，任务被执行多次。
+#:   外层 UPDATE  「选中」和「标记为 running」在同一条语句里完成，中间没有窗口。
+#:   COALESCE     attempts 每次累加，但 started_at 只在首次领取时写，不被覆盖。
+#:   RETURNING *  领取完直接拿回整行，不用再查一次（MySQL 做不到）。
+#:
+#: 契约见 tests/test_queue.py。
 CLAIM_SQL = """
-    -- TODO(你来写)
-    -- $1 = worker_id, $2 = lease_seconds
+    UPDATE runs
+       SET status           = 'running',
+           attempts         = attempts + 1,
+           locked_by        = $1,
+           lease_expires_at = now() + make_interval(secs => $2),
+           started_at       = COALESCE(started_at, now())
+     WHERE id = (
+         SELECT id
+           FROM runs
+          WHERE attempts < max_attempts
+            AND (status = 'queued'
+                 OR (status = 'running' AND lease_expires_at < now()))
+          ORDER BY created_at
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+     )
+    RETURNING *
 """
 
 

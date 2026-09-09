@@ -1,135 +1,125 @@
 # RepoPilot
 
-A controlled repository / coding agent. Give it a task and a repo; it plans a change,
-edits files, runs the test suite in an isolated workspace, retries on failure within a
-budget, and returns a unified diff plus a machine-readable evaluation of its own run.
+把 Coding Agent 接进真实研发流程的后端服务。
 
-Built with FastAPI, LangGraph, Pydantic v2 and asyncio.
+任务入队 → worker 领取 → Agent 在隔离副本里改代码并跑测试 → 按预算重试 →
+**产物停在人工审批闸门** → 批准后才发布。
+
+技术栈：FastAPI · LangGraph · Pydantic v2 · asyncio · PostgreSQL 17 · asyncpg
 
 ```
-POST /runs ──▶ analyze ──▶ plan ──▶ execute ──▶ run_tests ──▶ evaluate ──▶ finish ──▶ diff
-                                      ▲                          │
-                                      └────── retry (budgeted) ──┘
+POST /runs ─▶ [runs 表 queued] ─▶ Worker 领取(SKIP LOCKED + 租约)
+                                      │
+                          analyze ─▶ plan ─▶ execute ─▶ run_tests ─▶ evaluate
+                                               ▲                        │
+                                               └──── retry(有预算) ──────┘
+                                      │
+                              pending_approval ──▶ 人工审批 ──▶ publishing
 ```
 
-## Quick start
+## 快速开始
 
 ```bash
-make sync          # uv sync (+ macOS .pth fixup, see docs/failures.md)
-make test          # 26 pass, 5 fail on purpose - see "Handwrite task" below
-make demo          # run one task end-to-end, no server, no API key
-make run           # uvicorn on :8000
+make db-up         # 起 Postgres（端口 5433）
+make test          # 75 passed
+make demo          # 单跑一次 Agent，不用起服务、不用 API key
+make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 ```
 
-No API key is required. With `ANTHROPIC_API_KEY` unset, RepoPilot falls back to
-`ScriptedLLM`, a deterministic test double that only understands the bundled fixture
-repo. Set the key in `.env` (see `.env.example`) to use a real model.
+不需要 API key。没有 `ANTHROPIC_API_KEY` 时自动降级到 `ScriptedLLM`
+（确定性测试替身，只认识内置样例仓库）。配 `.env` 后走真实模型，见 `.env.example`。
 
-### Drive it over HTTP
+### 跑一次完整业务链路
 
 ```bash
-curl -s localhost:8000/health
-
-RID=$(curl -s -X POST localhost:8000/runs \
-  -H 'content-type: application/json' \
+RID=$(curl -s -X POST localhost:8000/runs -H 'content-type: application/json' \
   -d '{"task":"Fix divide() so dividing by zero raises ValueError"}' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
 
-curl -sN localhost:8000/runs/$RID/events     # live SSE, one frame per node
-curl -s  localhost:8000/runs/$RID | python3 -m json.tool
+curl -sN localhost:8000/runs/$RID/events        # SSE，每个节点一帧
+curl -s  localhost:8000/runs/$RID | python3 -m json.tool   # → pending_approval
+
+curl -s -X POST localhost:8000/runs/$RID/approval \
+  -H 'content-type: application/json' \
+  -d '{"decision":"approved","decided_by":"me","reason":"diff 看过了"}'   # → publishing
+
+curl -s -X POST localhost:8000/runs/$RID/approval \
+  -H 'content-type: application/json' -d '{"decision":"approved","decided_by":"me"}'
+# → 409，不能批准两次
 ```
 
-## What it actually does
+数据库可视化：DBeaver 连 `localhost:5433`，库/用户/密码都是 `repopilot`。
 
-The bundled `fixtures/sample_repo` has a real bug: `divide()` has no zero check, so
-`test_divide_by_zero_raises_value_error` fails. A run copies that repo into
-`.workspaces/<run_id>/`, commits a baseline, lets the agent work, and diffs the result:
+## 设计要点
 
-```
-verdict: success
-files changed: calculator.py
-tests: passed
-attempts: 1
-tool calls: 6
-```
+### 不信任模型输出
 
-```diff
- def divide(a: float, b: float) -> float:
-+    if b == 0:
-+        raise ValueError("division by zero")
-     return a / b
-```
-
-## Design
-
-The constraint that shapes everything: **LLM-generated code never runs unsandboxed
-against the host repository.** Three separate layers of containment:
-
-| Risk | Mitigation |
+| 风险 | 措施 |
 |---|---|
-| Model writes outside the repo | `Workspace.resolve()` rejects absolute paths, `..`, symlink escapes |
-| Generated code never terminates | Wall-clock timeout + `os.killpg` on the process group |
-| A bad edit corrupts the real repo | Agent operates on a `copytree`, never the original |
+| 模型写到仓库外 | `Workspace.resolve()` 拒绝绝对路径、`..`、符号链接逃逸 |
+| 生成的代码不终止 | 墙钟超时 + `os.killpg` 杀整个进程组 |
+| 改坏真实仓库 | 全程操作 `copytree` 出来的副本 |
+| Agent 自称成功 | 用测试结果判定，且状态机不允许 `running` 直达 `published` |
 
-There is deliberately **no general shell tool**. The only execute-risk tool is
-`run_tests`, which runs a fixed pytest command line.
+**刻意没有通用 shell 工具**。唯一的执行类工具是 `run_tests`，命令行写死。
 
-Every tool call goes through one registry that enforces a timeout, an
-`asyncio.Semaphore` concurrency cap, and converts any failure into
-`ToolResult(ok=False)` so a bad tool can never kill a run.
+### 不信任进程活着
 
-Full call chain and module boundaries: **[docs/architecture.md](docs/architecture.md)**.
+| 机制 | 做法 | 对照 |
+|---|---|---|
+| 任务不丢 | 落库后才返回 202，worker 异步领取 | MQ 持久化 |
+| worker 崩了 | 租约到期任务自动可被重领 | MQ ack 超时重投 |
+| 长任务不被抢 | 心跳续租；失去所有权时续租失败 | 消费者续期 |
+| 无限重试 | `attempts < max_attempts` + reaper | 死信队列 |
+| 重复触发 | `webhook_deliveries` 唯一约束 + `ON CONFLICT DO NOTHING` | 幂等键 |
+| 并发写冲突 | `UPDATE ... WHERE status = 当前状态` | 乐观锁 / `@Version` |
+| 优雅停机 | 停止领新任务 → 等收尾 → 超时取消靠租约回收 | 优雅下线 |
 
-## Evaluation
+队列直接用 `runs` 表：`FOR UPDATE SKIP LOCKED` + 租约。队列和业务表是同一张表，
+入队和业务写入天然同事务，不存在双写不一致。取舍见 `docs/learning.md`。
 
-A run is not judged only by its final output. `evaluation/metrics.py` reports the
-trajectory:
+### 两层限流
+
+`Worker._slots`（同时几个 Agent，默认 2）× `ToolRegistry._semaphore`
+（单个 Agent 内工具并发，默认 4）—— 是**乘**的关系，最坏 8 个工具同时在跑。
+
+## 评测
+
+不只看最终输出，也看轨迹：
 
 ```json
 {
-  "task_success": true,
-  "tests_passed": true,
-  "retry_count": 0,
-  "tool_calls_total": 7,
-  "tool_calls_failed": 1,
-  "tool_selection": {"list_files": 1, "read_file": 2, "write_file": 1, "run_tests": 1},
-  "diff_valid": true,
-  "failure_reason": "none"
+  "task_success": true, "tests_passed": true, "retry_count": 0,
+  "tool_calls_total": 7, "tool_calls_failed": 0,
+  "tool_selection": {"list_files":1,"read_file":2,"search_code":1,"write_file":1,"run_tests":1},
+  "diff_valid": true, "failure_reason": "none"
 }
 ```
 
-## Handwrite task
-
-`search_code` in [src/repopilot/tools/fs_tools.py](src/repopilot/tools/fs_tools.py) is
-intentionally unimplemented. Its contract lives in the docstring and its six tests in
-[tests/test_search_code.py](tests/test_search_code.py) are red until you write it.
-
-```bash
-uv run pytest tests/test_search_code.py -v
-```
-
-The registry catches `NotImplementedError` and degrades it to a failed `ToolResult`, so
-the rest of the agent keeps working meanwhile.
-
-## Project layout
+## 目录
 
 ```
 src/repopilot/
-  api/            FastAPI routes, DTOs, SSE, run lifecycle
-  agent/          AgentState, nodes, graph wiring, prompts
-  tools/          tool contract + registry, fs/git/test tools
-  workspace/      per-run repo copy, path confinement
-  sandbox/        subprocess execution with hard timeout
-  llm/            provider adapters, structured output
-  evaluation/     trajectory metrics
-  observability/  run_id context, logging
-fixtures/sample_repo/   target repo used by the demo and tests
-docs/            architecture, progress, learning notes, failure log
+  api/            FastAPI 路由、DTO、SSE
+  domain/         状态机（唯一真相来源）
+  db/             schema、仓储、队列 SQL、幂等、审批
+  worker/         领取循环、限流、租约、事件总线
+  agent/          AgentState、节点、图、提示词
+  tools/          工具契约与注册表
+  workspace/      仓库副本、路径收敛
+  sandbox/        带硬超时的进程执行
+  llm/            供应商适配、结构化输出
+  evaluation/     轨迹指标
+db/schema.sql     3 张表：runs / webhook_deliveries / approvals
+fixtures/sample_repo/   演示与测试用的目标仓库
+docs/             架构、进度、面试笔记、故障复盘
 ```
 
-## Status
+## 状态
 
-Working: the full loop, six tools, SSE streaming, retry budget, evaluation, 26 tests.
+**已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批闸门）、
+租约与限流、SSE、评测指标、75 个测试。
 
-Not built yet: MCP server, Docker sandbox, OpenTelemetry traces, persistence, auth.
-Honest gaps are tracked in [docs/progress.md](docs/progress.md).
+**未完成**（诚实列出）：GitHub 接入、评测基准集、Docker sandbox、MCP server、
+OpenTelemetry、API 鉴权。事件总线是进程内的，拆多进程需换 Redis pub/sub 或
+PG `LISTEN/NOTIFY`。详见 [docs/progress.md](docs/progress.md)。

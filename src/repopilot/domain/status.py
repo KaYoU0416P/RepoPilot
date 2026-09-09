@@ -69,18 +69,15 @@ class InvalidTransition(ValueError):
 
 
 def can_transition(current: RunStatus, target: RunStatus) -> bool:
-    """TODO(你来写)。契约见 tests/test_status.py。
+    """current 能不能变成 target。
 
-    要求：
-      1. 从 TRANSITIONS 里查 current 允许的目标集合。
-      2. target 在集合里 → True，否则 → False。
-      3. current 不在 TRANSITIONS 里（脏数据）→ False，不要抛异常。
-      4. 不要在这里抛异常，判断和报错是两件事。
+    只回答「能不能」，不抛异常 —— 判断和报错是两件事，报错交给 assert_transition。
+    脏数据（数据库里读到不认识的状态）走 .get 的默认值，得到空集合，自然是 False。
 
-    提示：dict 的 .get(key, 默认值) 在 key 不存在时返回默认值，
-    等价于 Java 的 map.getOrDefault(key, default)。
+    注意自转也是 False：TRANSITIONS[X] 里不含 X。这是刻意的，因为
+    transition() 用 `WHERE status = 当前状态` 做乐观锁，允许原地踏步会让它失去意义。
     """
-    raise NotImplementedError("can_transition 是你的手写任务")
+    return target in TRANSITIONS.get(current, frozenset())
 
 
 def assert_transition(current: RunStatus, target: RunStatus) -> None:

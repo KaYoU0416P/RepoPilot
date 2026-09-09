@@ -29,18 +29,12 @@
 - 真实 HTTP 验证通过：入队 → worker 领取 → Agent 修好 → `pending_approval`
   → 批准 → `publishing`；重复批准返回 409；审批流水可查。
 
+- 4 个核心实现全部完成：`search_code`（本人手写）、`can_transition`、
+  `CLAIM_DELIVERY_SQL`、`CLAIM_SQL`。**75 passed，ruff 全绿。**
+
 ## NOW
 
-**4 个手写任务，按这个顺序做**（红灯数量已实测）：
-
-| 顺序 | 位置 | 量 | 解锁 |
-|---|---|---|---|
-| 1 | `domain/status.py::can_transition` | 1 行 | 16 + 6 个用例 |
-| 2 | `db/deliveries.py::CLAIM_DELIVERY_SQL` | 4 行 SQL | 7 个用例 |
-| 3 | `db/runs.py::CLAIM_SQL` | ~17 行 SQL（最难） | 11 个用例 |
-| 4 | `tools/fs_tools.py::search_code` | ~25 行 Python | 5 个用例 |
-
-全部完成后：`make test` 应该 **75 passed**。
+Stage A 收尾完成，等待推进 Stage B。
 
 ## NEXT
 

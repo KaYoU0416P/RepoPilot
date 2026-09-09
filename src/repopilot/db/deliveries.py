@@ -18,12 +18,18 @@ from repopilot.observability import get_logger
 log = get_logger(__name__)
 
 
-#: 幂等去重的 SQL。**这是第二段值得你背下来的 SQL。**
-#: 契约见 tests/test_idempotency.py。
+#: 幂等去重的 SQL。判断「是不是第一次」和「登记」是同一条语句，天然原子。
+#:
+#:   ON CONFLICT DO NOTHING  →  主键冲突就静默跳过（MySQL 的 INSERT IGNORE）
+#:   RETURNING delivery_id   →  只有真插进去才返回一行；跳过时零行
+#:                              （MySQL 没有 RETURNING，得再查一次才知道）
+#:
+#: 所以 Python 侧 `record is None` 就等于「这是重复投递」。
 CLAIM_DELIVERY_SQL = """
-    -- TODO(你来写)
-    -- $1 = delivery_id, $2 = source, $3 = event_type, $4 = payload(jsonb)
-    -- 第一次插入要 RETURNING 出点东西；重复投递要一行都不返回。
+    INSERT INTO webhook_deliveries (delivery_id, source, event_type, payload)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (delivery_id) DO NOTHING
+    RETURNING delivery_id
 """
 
 

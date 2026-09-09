@@ -83,21 +83,43 @@ async def search_code(
     glob: str = "**/*.py",
     max_results: int = 50,
 ) -> ToolResult:
-    """TODO(you): implement this. See tests/test_search_code.py for the contract.
+    # ---- 第 1 步：编译正则。非法正则不能让整个 run 崩掉，转成 ok=False ----
+    try:
+        regex = re.compile(pattern)
+    except re.error as exc:
+        return ToolResult(
+            tool="search_code",
+            ok=False,
+            error=f"invalid regex {pattern!r}: {exc}",
+        )
 
-    Requirements:
-      1. Compile `pattern` as a regex. On re.error -> ToolResult(ok=False, error=...).
-      2. For every file in workspace.iter_files(glob), scan line by line.
-      3. Collect matches formatted as f"{rel_path}:{lineno}: {line.strip()}".
-      4. Stop once len(matches) == max_results.
-      5. Return ok=True, content="\\n".join(matches), meta={"count": len(matches)}.
-         Zero matches is still ok=True with content "(no matches)".
-      6. Skip files that fail to decode as UTF-8 rather than crashing the run.
+    # ---- 第 2 步：准备一个空列表装结果 ----
+    matches: list[str] = []
 
-    Useful: `re.compile`, `workspace.iter_files(glob)`, `workspace.relative(path)`,
-    `path.read_text(encoding="utf-8", errors="replace")`, `str.splitlines()`.
-    """
-    raise NotImplementedError("search_code is your handwrite task - see docstring")
+    # ---- 第 3 步：外层循环，遍历每个文件 ----
+    for path in workspace.iter_files(glob):
+        if len(matches) >= max_results:
+            break
 
+        # 读不出来的文件（二进制、没权限）跳过，不要让一个坏文件毁掉整次搜索
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
 
-_ = re  # kept so the import is available for your implementation
+        rel = workspace.relative(path)
+
+        # ---- 第 4 步：内层循环，遍历每一行 ----
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if regex.search(line):
+                matches.append(f"{rel}:{lineno}: {line.strip()}")
+                if len(matches) >= max_results:
+                    break
+
+    # ---- 第 5 步：组装返回。注意搜不到也是 ok=True ----
+    return ToolResult(
+        tool="search_code",
+        ok=True,
+        content="\n".join(matches) if matches else "(no matches)",
+        meta={"count": len(matches)},
+    )

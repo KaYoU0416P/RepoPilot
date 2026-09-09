@@ -129,6 +129,94 @@ boundary rather than an `AttributeError` three nodes later.
 
 ---
 
+## 用 Postgres 表当任务队列
+
+**核心 SQL**（`db/runs.py::CLAIM_SQL`）：外层 `UPDATE` 包一个内层
+`SELECT ... ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`，最后 `RETURNING *`。
+
+**`SKIP LOCKED` 解决什么**：
+
+| 写法 | 10 个 worker 同时抢的结果 |
+|---|---|
+| 什么都不加 | 全读到同一行，**同一个任务执行 10 次** |
+| `FOR UPDATE` | 排队等锁，退化成串行，**吞吐崩了** |
+| `FOR UPDATE SKIP LOCKED` | 跳过已锁住的行，各拿各的，互不阻塞 |
+
+**别说错**：`SKIP LOCKED` **MySQL 8.0 也有**，不是 PG 独有。PG 在这里的真正优势是
+`RETURNING`（一条语句完成「领取 + 拿到内容」，MySQL 得再查一次且中间有并发窗口）
+和**部分索引**（`CREATE INDEX ... WHERE status IN (...)`，队列表 99% 是历史数据，
+全量索引又大又没用；MySQL 没这功能）。
+
+**什么时候该用 MQ 而不是数据库表**：吞吐到万级 TPS、需要扇出/多消费组、
+需要跨服务解耦时。我们这里任务是分钟级的、量小，且**任务本身就是业务实体
+（要查询、要审批、要展示历史）**，用表更省事，还免去「MQ 和 DB 双写不一致」。
+这个取舍要能主动讲。
+
+**一句话**：「队列和业务表是同一张表，所以入队和业务写入天然在一个事务里，
+不存在双写不一致。」
+
+---
+
+## 租约（lease）：不依赖进程活着的可靠性
+
+worker 不是「拿一把锁直到干完」，而是**租一段时间，到期不续租就自动失效**。
+
+- 领取时写 `locked_by` + `lease_expires_at = now() + N 秒`
+- 干活期间后台协程定期 `heartbeat` 续租
+- worker 被 `kill -9` → 没人续租 → 租约过期 → 任务被别的 worker 领走
+- `attempts >= max_attempts` 的僵尸由 reaper 标记 failed，防止无限打转
+
+**Java 对照**：等价于 RabbitMQ 的 **ack 超时重投**，或 Redisson 看门狗续期。
+区别是这里的「锁」只是数据库里一个时间戳字段，没有额外中间件。
+
+**续租失败必须让 worker 知道**：`heartbeat` 的 `WHERE locked_by = $2` 条件，
+租约已被别人抢走就返回 False —— 否则会出现两个 worker 同时写一个 run。
+
+---
+
+## 幂等：为什么必须靠数据库唯一约束
+
+```sql
+INSERT INTO webhook_deliveries (...) VALUES (...)
+ON CONFLICT (delivery_id) DO NOTHING
+RETURNING delivery_id
+```
+
+`DO NOTHING` 时**零行返回**，所以 `record is None` 就等于「重复投递」。
+**判断和登记是同一条语句**，天然原子。
+
+**先 SELECT 再 INSERT 为什么是错的**：N 个并发请求会同时读到「不存在」，
+然后全都以为自己是第一个。`test_concurrent_duplicates_only_one_wins` 用 20 个
+并发协程专门打这个错。**唯一约束是唯一可靠的仲裁者。**
+
+**MySQL 对照**：`INSERT IGNORE` / `ON DUPLICATE KEY UPDATE` 效果类似，
+但**没有 `RETURNING`**，必须再查一次才知道是不是自己插进去的。
+
+**一句话**：「幂等键的判重不能放在应用层，要放在数据库的唯一约束上。」
+
+---
+
+## 状态机为什么要表驱动
+
+把「谁能变成谁」写成一张 `dict[状态, frozenset[状态]]`，而不是散落各处的 if。
+
+- 非法流转在**一个地方**被挡住
+- 这张表本身可以被测试（用 BFS 验证「每个活跃状态都能到达终态」，防死角）
+- 终态 = 没有出边的状态，**从表推导**，不手写第二份清单
+
+**两层保护缺一不可**：
+1. 应用层 `assert_transition` —— 挡业务上非法的流转（`running` 不能直接 `published`）
+2. 数据库层 `UPDATE ... WHERE status = 当前状态` —— 乐观锁，挡「读到写之间被人改了」
+
+**为什么自转也非法**：第 2 层用 `status` 本身当版本号，允许原地踏步会让乐观锁失效。
+
+**Java 对照**：第 2 层就是 JPA 的 `@Version`，只是这里用 status 当版本号。
+
+**一句话**：「Agent 说成功不算成功 —— `running` 到 `published` 没有直达的边，
+必须经过 `pending_approval`。这一条约束就是审批闸门的全部实现。」
+
+---
+
 ## Why a coding agent needs a sandbox
 
 Three distinct risks, three distinct mitigations:
