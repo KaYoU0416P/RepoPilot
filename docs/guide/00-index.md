@@ -24,7 +24,7 @@
 | [02-syntax.md](02-syntax.md) | **高频语法大全**。每条都配本项目真实出处 + Java 对照 | 当字典查，别通读 |
 | [03-asyncio.md](03-asyncio.md) | `async` / `await` / 事件循环 / 并发控制，深入浅出 | 项目 60% 的代码是异步的，必读 |
 | [04-stack.md](04-stack.md) | Pydantic、FastAPI、asyncpg + PostgreSQL、LangGraph 四个框架 | 面试问框架时 |
-| [05-happy-path.md](05-happy-path.md) | **主线**：一条 `curl` 从进门到 PR，14 站，每行代码拳拳到肉 | 核心，反复读 |
+| [05-happy-path.md](05-happy-path.md) | **主线**：一条 `curl` 从进门到 PR，21 站，每行代码拳拳到肉（含 GitHub webhook 这条旁路入口） | 核心，反复读 |
 | [06-faq.md](06-faq.md) | 排错手册 + 面试问答口径 + 已知缺口 | 面试前一天 |
 
 ## 一句话记住这个项目
@@ -43,7 +43,7 @@
 ```bash
 make sync      # 装依赖（永远用这个，不要 uv sync，原因见 01 章 §6）
 make db-up     # 起 PostgreSQL（Docker，端口 5433）
-make test      # 跑测试，应该 75 passed
+make test      # 跑测试，应该 118 passed
 make demo      # 不起服务、不用 API key，单跑一次 Agent
 make run       # 起 API，浏览器开 http://localhost:8000/docs
 make psql      # 进数据库命令行

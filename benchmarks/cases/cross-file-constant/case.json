@@ -1,0 +1,8 @@
+{
+  "id": "cross-file-constant",
+  "title": "税率写死在计算里，没用配置里的常量",
+  "task": "订单总价算出来不对。config.py 里定义了税率，但结账逻辑没有用它。修好它。",
+  "category": "cross_file",
+  "expected": "fixed",
+  "notes": "bug 表现在 checkout.py，正确答案在 config.py。只读报错文件是修不好的，必须顺着去看第二个文件。"
+}

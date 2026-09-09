@@ -1,0 +1,8 @@
+{
+  "id": "case-insensitive",
+  "title": "邮箱查重没有忽略大小写",
+  "task": "is_registered() 认为 Alice@x.com 和 alice@x.com 是两个不同的邮箱，应该忽略大小写。修好它。",
+  "category": "single_file",
+  "expected": "fixed",
+  "notes": "单文件但要求两处一起改（注册时和查询时都要归一化），只改一处会在隐藏测试里露馅。"
+}

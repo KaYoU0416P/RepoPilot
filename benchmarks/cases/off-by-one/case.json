@@ -1,0 +1,8 @@
+{
+  "id": "off-by-one",
+  "title": "分页切片少取一条",
+  "task": "paginate() 返回的每页条数不对，最后一条总是丢。修好它。",
+  "category": "single_file",
+  "expected": "fixed",
+  "notes": "最基础的一档。切片右边界写成了 start + size - 1。修不了说明整条链路有问题。"
+}

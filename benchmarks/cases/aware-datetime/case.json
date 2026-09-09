@@ -1,0 +1,8 @@
+{
+  "id": "aware-datetime",
+  "title": "带时区和不带时区的 datetime 相比较",
+  "task": "is_expired() 抛 TypeError: can't compare offset-naive and offset-aware datetimes。修好它，过期判断要用 UTC。",
+  "category": "needs_dependency",
+  "expected": "fixed",
+  "notes": "得知道 datetime.utcnow() 返回的是 naive 对象、正确写法是 datetime.now(UTC)。照着报错改（比如给两边都 replace(tzinfo=None)）会让隐藏测试挂掉。"
+}

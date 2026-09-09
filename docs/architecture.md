@@ -90,7 +90,7 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | `workspace/` | 仓库副本、路径收敛 | 工具、Agent |
 | `sandbox/` | 带硬超时的进程执行 | 在跑什么 |
 | `llm/` | 供应商适配、结构化输出 | 工具、workspace |
-| `evaluation/` | 轨迹指标 | HTTP、LLM |
+| `evaluation/` | 轨迹指标、评测基准集与判分 | HTTP、LLM、数据库 |
 
 依赖单向：`api → worker → agent → tools → {workspace, sandbox}`；
 `db`、`domain`、`llm`、`evaluation` 是叶子。
@@ -149,12 +149,29 @@ Agent 自己说成功不算数，必须有人看过 diff。
 发布缺 token 降级继续。因为**验签是安全边界，发布是功能**。安全边界宁可不可用，
 功能宁可降级。这条区分要能主动讲。
 
+## 评测
+
+`benchmarks/cases/` 15 个 seeded bug，`make bench` 出报表。详见 `benchmarks/README.md`。
+
+评测链路**刻意绕开数据库、队列和审批**：它要回答的是「Agent 修 bug 行不行」，
+掺进基础设施只会让一次失败分不清是谁的问题。
+
+```
+BenchHarness.run_case          evaluation/harness.py
+  ├─▶ 基线自检     一次性副本上跑隐藏测试，必须失败（否则 broken_case）
+  ├─▶ Agent 修     另一份干净副本，全程看不到 verify/
+  └─▶ 判分         把 verify/ 拷进去再跑 —— 这才是事实
+```
+
+两条铁律：**判分不看 Agent 自述**（不一致就是 `false_success`），
+**判分用的测试 Agent 看不见**（否则删测试就是最省事的通关方式）。
+
 ## 当前状态
 
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
-worker 租约与限流、SSE、评测指标、GitHub webhook 入口、发布链路（PR + 评论），
-118 个测试。**`Issue → Run → 审批 → PR` 整条链路已闭环。**
+worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
+15 个 case 的评测基准集，170 个测试。
+**`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
 **未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、
-评测基准集（Stage C）、Docker sandbox、MCP server、OpenTelemetry、API 鉴权。
-详见 `docs/progress.md`。
+Docker sandbox、MCP server、OpenTelemetry、API 鉴权。详见 `docs/progress.md`。

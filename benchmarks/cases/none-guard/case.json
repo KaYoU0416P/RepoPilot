@@ -1,0 +1,8 @@
+{
+  "id": "none-guard",
+  "title": "缺少 None 判断导致 AttributeError",
+  "task": "display_name() 在用户没填昵称时崩溃，应该退回到用户名。修好它。",
+  "category": "single_file",
+  "expected": "fixed",
+  "notes": "报错信息（AttributeError: NoneType）直接指向问题。基线档，用来对照更难的 case。"
+}

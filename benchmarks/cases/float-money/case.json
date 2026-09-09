@@ -1,0 +1,8 @@
+{
+  "id": "float-money",
+  "title": "浮点数算钱累积误差",
+  "task": "把 0.1 元加十次，total_cents() 算出来不是 100 分。金额计算不能用 float。修好它。",
+  "category": "needs_dependency",
+  "expected": "fixed",
+  "notes": "得知道 Decimal，而且要用 Decimal(str(x)) 而不是 Decimal(0.1)（后者照样带二进制误差）。单纯加 round() 能骗过可见测试，但骗不过隐藏测试里的长序列。"
+}

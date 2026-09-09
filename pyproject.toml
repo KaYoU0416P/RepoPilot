@@ -40,8 +40,9 @@ markers = ["slow: spawns subprocesses or runs the whole graph"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
-# fixtures/ is the agent's *target* repo, not our source. It is meant to contain a bug.
-exclude = ["fixtures", ".workspaces"]
+# fixtures/ 和 benchmarks/ 是 Agent 的**目标仓库**，不是我们的源码。
+# 里面的 bug 是故意种的 —— 让 ruff 去"修"评测集，评测就没意义了。
+exclude = ["fixtures", "benchmarks", ".workspaces"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]

@@ -1,4 +1,4 @@
-.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb lint fmt run demo clean
+.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check lint fmt run demo clean
 
 # uv 在这台机器上写出来的 .pth 带 macOS UF_HIDDEN 标志，而 CPython 的 site.py
 # 会静默跳过隐藏的 .pth -> import repopilot 失败。详见 docs/failures.md。
@@ -36,6 +36,18 @@ test-fast: sync db-up
 test-nodb: sync
 	uv run pytest tests/test_status.py tests/test_tools.py tests/test_workspace.py \
 	              tests/test_search_code.py tests/test_graph.py
+
+# ------------------------------------------------------------------ 评测
+# 跑 15 个 seeded bug，出成功率 / 重试 / 工具分布 / 失败原因报表。
+# 没有 ANTHROPIC_API_KEY 时会降级到 ScriptedLLM，那时分数没有意义，
+# 只能验证 harness 通不通 —— 脚本自己会警告。
+bench: sync
+	uv run python scripts/bench.py --json bench-report.json
+
+# 只体检评测集本身：每个 case 的 bug 是不是真的种进去了、
+# 参考答案能不能过隐藏测试。不调 LLM，不花钱。
+bench-check: sync
+	uv run pytest tests/test_bench.py -q
 
 lint:
 	uv run ruff check .

@@ -1,0 +1,8 @@
+{
+  "id": "missing-regression-test",
+  "title": "修 bug 并补上回归测试",
+  "task": "chunk() 在 size 为 0 时会无限循环。修好它（size <= 0 应抛 ValueError），并在 test_chunking.py 里补一条覆盖该情况的测试。",
+  "category": "needs_test_change",
+  "expected": "fixed",
+  "notes": "同时要求改实现和加测试。隐藏测试既检查行为，也检查可见测试文件里确实多了一条断言——只改实现不写测试算没完成。"
+}

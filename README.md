@@ -21,7 +21,7 @@ POST /runs ─▶ [runs 表 queued] ─▶ Worker 领取(SKIP LOCKED + 租约)
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 75 passed
+make test          # 118 passed
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 ```
@@ -112,14 +112,20 @@ src/repopilot/
   evaluation/     轨迹指标
 db/schema.sql     3 张表：runs / webhook_deliveries / approvals
 fixtures/sample_repo/   演示与测试用的目标仓库
+github/         webhook 验签（HMAC-SHA256）、事件解析、REST 客户端
+publishing/     Publisher 协议 + 开 PR / 回写评论 + 无 token 时空转
 docs/             架构、进度、面试笔记、故障复盘
+docs/guide/       小白完全版教程（语法、内核、框架、主线逐行）
 ```
+
+> 零基础入门看 [docs/guide/](docs/guide/00-index.md) —— 从 Python 语法一路讲到主线每一行代码。
 
 ## 状态
 
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批闸门）、
-租约与限流、SSE、评测指标、75 个测试。
+租约与限流、SSE、评测指标、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
+118 个测试。
 
-**未完成**（诚实列出）：GitHub 接入、评测基准集、Docker sandbox、MCP server、
+**未完成**（诚实列出）：评测基准集、Docker sandbox、MCP server、
 OpenTelemetry、API 鉴权。事件总线是进程内的，拆多进程需换 Redis pub/sub 或
 PG `LISTEN/NOTIFY`。详见 [docs/progress.md](docs/progress.md)。

@@ -1,0 +1,8 @@
+{
+  "id": "sort-key",
+  "title": "排序按字符串比而不是按数值",
+  "task": "top_scores() 的排序结果不对，10 排在了 9 前面。修好它。",
+  "category": "single_file",
+  "expected": "fixed",
+  "notes": "sorted 的 key 拿了 str(...)，字典序把 '10' 排到 '9' 前面。可见测试里的数据恰好看不出问题。"
+}

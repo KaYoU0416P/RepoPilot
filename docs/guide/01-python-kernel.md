@@ -337,7 +337,8 @@ py_agent/
 │   ├── workspace/          仓库副本 + 路径收敛（安全核心）
 │   ├── sandbox/            带硬超时的子进程执行
 │   ├── llm/                大模型适配层（真模型 / 测试替身）
-│   ├── github/             GitHub webhook 验签与解析
+│   ├── github/             GitHub webhook 验签与解析 + REST 客户端
+│   ├── publishing/         开 PR / 回写 Issue 评论（真发 / 无 token 时空转）
 │   ├── evaluation/         轨迹指标（成功率、工具分布、重试次数）
 │   └── observability/      日志 + run_id 上下文
 │

@@ -1,0 +1,8 @@
+{
+  "id": "cross-file-import",
+  "title": "函数搬家了，导入路径没改",
+  "task": "import 报错，服务起不来。slugify 被移动过位置。修好它。",
+  "category": "cross_file",
+  "expected": "fixed",
+  "notes": "得先找到 slugify 现在住在哪个文件——需要 search_code 而不是只读报错文件。考察工具选择。"
+}

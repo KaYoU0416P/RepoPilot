@@ -1,0 +1,8 @@
+{
+  "id": "cross-file-signature",
+  "title": "被调方改了返回类型，调用方没跟上",
+  "task": "报表里的用户名全变成了单个字符。parser.py 最近改过返回值，report.py 没有同步。修好它。",
+  "category": "cross_file",
+  "expected": "fixed",
+  "notes": "parse_row 从返回 str 改成返回 dict，调用方还在按字符串索引取值。报错点和根因隔了一个文件，而且不抛异常，只是结果不对——比崩溃更难。"
+}

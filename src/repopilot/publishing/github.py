@@ -44,6 +44,26 @@ GIT_ENV = {
 COMMITTER = ["-c", "user.name=repopilot", "-c", "user.email=agent@repopilot.local"]
 
 
+def commit_env(row: RunRow) -> dict[str, str]:
+    """让同一个 run 每次都提交出**完全一样的 commit SHA**。
+
+    ★这是"重复 push 是 no-op"能成立的前提，一开始我漏了，测试抓到了。
+
+    git 的 commit SHA 是对「树 + 父提交 + 作者 + 提交者 + **时间戳** + 消息」
+    整体做哈希。树和父提交本来就一样（同一份 clone + 同一份 diff），但时间戳
+    默认取当下 —— 于是重试时算出来的是另一个 SHA，push 上去就变成
+    non-fast-forward 被远端拒绝，"幂等"直接失效。
+
+    把两个日期钉死在 `run.created_at` 上，SHA 就完全确定了：第二次 push
+    推的是和远端**一模一样**的 commit，git 直接返回 Everything up-to-date。
+
+    （这个 bug 表现为"偶尔失败"：两次发布落在同一秒时 SHA 恰好相同就过了。
+    最初那版测试就是这么飘的。时间相关的不确定性一定要钉死，不能靠运气。）
+    """
+    stamp = row.created_at.isoformat()
+    return {**GIT_ENV, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+
+
 def branch_name(run_id) -> str:
     """确定性分支名 —— 同一个 run 永远算出同一个分支。见模块头注释第 2 点。"""
     return f"repopilot/run-{str(run_id)[:8]}"
@@ -123,6 +143,7 @@ class GitHubPublisher:
             ["git", *COMMITTER, "commit", "-q", "--no-gpg-sign", "-m", self._commit_message(row)],
             cwd=clone,
             failure="提交失败",
+            env=commit_env(row),  # ← 时间戳钉死，SHA 才确定
         )
 
     async def _push(self, workdir: Path, repo: str, branch: str) -> None:
@@ -225,6 +246,7 @@ class GitHubPublisher:
         cwd: Path,
         failure: str,
         redact: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         """跑一条 git 命令，失败就抛 PublishError。
 
@@ -232,7 +254,7 @@ class GitHubPublisher:
         kill —— 一个卡在网络上的 git push 不能把 worker 拖住。
         """
         result = await run_command(
-            command, cwd=cwd, timeout=self.settings.publish_timeout_seconds, env=GIT_ENV
+            command, cwd=cwd, timeout=self.settings.publish_timeout_seconds, env=env or GIT_ENV
         )
         if not result.ok:
             detail = (result.stderr or result.stdout or "").strip()

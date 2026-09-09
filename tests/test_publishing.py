@@ -233,6 +233,25 @@ async def test_republishing_reuses_the_existing_pr(
     assert not [r for r in api_calls if r.method == "POST" and r.url.path.endswith("/pulls")]
 
 
+async def test_republishing_produces_a_byte_identical_commit(source_repo, origin, publisher):
+    """"重复 push 是 no-op"能成立，全靠 commit SHA 是确定的。
+
+    git 的 SHA 把**时间戳**也哈希进去了，默认取当下 —— 重试时算出另一个 SHA，
+    push 就变成 non-fast-forward 被拒，幂等直接失效。
+    所以提交时把两个日期钉死在 run.created_at 上。
+
+    这个 bug 最初表现为"偶尔失败"：两次发布落在同一秒时 SHA 恰好相同就过了。
+    """
+    row = await make_run(source_repo)
+    branch = branch_name(row.id)
+
+    await publisher.publish(row)
+    first = git("rev-parse", branch, cwd=origin).strip()
+
+    await publisher.publish(row)
+    assert git("rev-parse", branch, cwd=origin).strip() == first
+
+
 async def test_unapplicable_diff_raises_publish_error(source_repo, publisher):
     """diff 打不上（源仓库在 Agent 跑完之后又变了）→ 逻辑失败，不该重试。"""
     row = await make_run(source_repo, diff="diff --git a/nope.py b/nope.py\n@@ -1 +1 @@\n-x\n+y\n")

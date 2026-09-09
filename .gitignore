@@ -9,3 +9,4 @@ build/
 *.egg-info/
 .workspaces/
 .DS_Store
+bench-report.json

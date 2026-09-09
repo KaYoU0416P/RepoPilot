@@ -1,0 +1,8 @@
+{
+  "id": "mutable-default",
+  "title": "可变默认参数在调用间串了",
+  "task": "add_tag() 第二次调用时会带上第一次的结果，两次调用互相污染。修好它。",
+  "category": "single_file",
+  "expected": "fixed",
+  "notes": "Python 独有的经典坑：默认参数在函数定义时求值一次，list 被所有调用共享。考察它懂不懂语言语义，而不是照着报错乱改。"
+}

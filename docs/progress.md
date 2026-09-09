@@ -34,7 +34,28 @@
 
 ## NOW
 
-**Stage B 第三步 — 发布链路完成。118 passed，ruff 全绿。**
+**Stage C — 评测基准集完成。170 passed / 2 skipped，ruff 全绿。**
+
+- `benchmarks/cases/` 15 个 seeded bug：单文件 5、跨文件 4、需要懂依赖语义 2、
+  需要改测试 2、**故意无解 2**。每个 case 三份：`repo/`（Agent 看得到）、
+  `verify/`（隐藏测试，判分用）、`solution/`（参考答案，只用来验隐藏测试）。
+- `evaluation/bench.py`：纯函数的判分规则 + 报表聚合，可以独立测。
+- `evaluation/harness.py`：基线自检 → 跑 Agent → 隐藏测试判分。
+  **刻意不碰数据库/队列/审批**，一次失败要能立刻分清是谁的问题。
+- 报表：成功率、按类别成功率、落点分布、**false_success**、平均重试、
+  平均工具调用、工具选择分布、失败原因分布。`make bench`。
+- **两条判分铁律**：判分不看 Agent 自述（不一致 = `false_success`）；
+  判分用的测试 Agent 看不见（否则删测试就是最省事的通关方式）。
+  harness 另外记录 Agent 删了哪些可见测试文件。
+- **评测集自己也被评测**：每个 case 两条体检 —— bug 真种进去了吗、
+  参考答案能过隐藏测试吗。第一条当场抓到我自己出的一个坏 case。
+- 顺手修了发布链路一个真 bug：commit SHA 含时间戳，重试时算出的 SHA 不同 →
+  push 变成 non-fast-forward 被拒，"重复 push 是 no-op"的幂等前提不成立。
+  把 `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` 钉死在 `run.created_at` 上。
+  **原来的测试是飘的**：两次发布落在同一秒才碰巧通过。
+- `benchmarks/` 加进 ruff 的 exclude —— 里面的 bug 是故意种的，别让 ruff 去"修"。
+
+### Stage B 第三步 — 发布链路
 **`Issue → Run → 审批 → PR` 整条链路已闭环。**
 
 - `github/client.py`：GitHub REST 客户端（PAT + httpx，不用 SDK，不碰 OAuth）。
@@ -68,9 +89,8 @@
 
 ## NEXT
 
-1. **Stage C — 评测集**（收益最高）：15 个 seeded bug，含跨文件的、需要读依赖的、
-   需要改测试的、**故意无解的**（证明 Agent 会放弃而不是瞎改 —— 这就是 retry
-   budget 存在的意义）。产出成功率 / 平均重试 / 平均工具调用 / 失败原因分布。
+1. **拿真 key 跑一轮 `make bench`**，把报表数字记进 learning.md。
+   现在只用 ScriptedLLM 验证过 harness 通，**没有真实分数**。
 2. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
    内置样例仓库；发布链路本身已经能处理真实 clone（`GitHubPublisher` 就是
    `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
@@ -101,4 +121,9 @@
   投递已记账、run 没建成、重投会被判重，事件就丢了。两张表在同一个库，
   技术上完全做得到一个事务，是刻意留的取舍。面试要主动讲这个缺口。
 - webhook 入队时 `repo_path` 还写死成内置样例仓库，没有真的 clone 目标仓库。
-- 评测只有单次运行，还没有任务基准集。
+- **评测基准集还没跑过真实 LLM**，只用 ScriptedLLM 验证过 harness 通。
+  报表里的数字目前没有意义，面试千万别拿它当成绩说。
+- 评测的 15 个 case 都是**小规模合成仓库**。真实项目的难点（几万行上下文、
+  隐式约定、构建系统）完全没覆盖，这是基准集的天花板。
+- 评测只跑一轮。LLM 有随机性，严谨做法是每个 case 跑 n 次取分布。
+- 评测不给"改动幅度"打分：重写整个文件和一行改对，现在得分一样。

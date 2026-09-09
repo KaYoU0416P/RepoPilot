@@ -1,0 +1,8 @@
+{
+  "id": "inheritance-override",
+  "title": "子类漏了一个必须重写的方法",
+  "task": "PercentDiscount 的折扣算错了，用的是基类的固定金额逻辑。修好它。",
+  "category": "cross_file",
+  "expected": "fixed",
+  "notes": "基类契约写在 base.py 的 docstring 里，子类在 discounts.py。要读懂契约才知道该重写什么。"
+}
