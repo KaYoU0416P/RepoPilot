@@ -257,6 +257,112 @@ GitHub 反复重投一个我们根本不想处理的事件，还会把 webhook �
 
 ---
 
+## 副作用的幂等：靠确定性的键，不靠"重试前先查一下"
+
+webhook 的幂等有数据库唯一约束兜底，**开 PR 没有**——PR 开在别人家的系统里，
+我们的数据库管不着。所以要自己造一个幂等键。
+
+做法：分支名 `repopilot/run-<run_id前8位>`，**从 run_id 算出来，不随机、不带时间戳**。
+于是：
+
+| 崩在哪一步 | 重试时发生什么 |
+|---|---|
+| clone / apply / commit 之前 | 临时目录早没了，重头来，无副作用 |
+| push 之后 | 推同样的提交是 no-op，git 自己就幂等 |
+| 开 PR 之前 | `GET /pulls?head=owner:分支` 查到上次开的 PR，复用不重开 |
+| 回评论之前 | 会重复评论一次。已知瑕疵，比重复开 PR 轻得多 |
+
+**关键在"确定性"三个字**。如果分支名带随机后缀或时间戳，重试时算出来的是新
+分支，上面所有查重全部失效，直接开出第二个 PR。
+
+**Java 对照**：等价于用业务主键（订单号）做幂等，而不是用 UUID。
+支付回调那套「先查再插、靠唯一索引兜底」是同一个思路，只是这里的"唯一索引"
+是 GitHub 上的分支名。
+
+**一句话**：「跨系统的副作用没法用事务，只能用确定性的幂等键 + 执行前查重。」
+
+---
+
+## 失败要分类：能重试的和不能重试的
+
+publisher 里两条路径严格分开：
+
+```python
+except PublishError:              # diff 打不上、4xx、external_ref 格式不对
+    transition(FAILED)            # 重试一万次也是这个结果 → 直接进终态
+# 其他异常不 catch                 # 5xx、网络抖动、进程被 kill
+                                  # → 冒出去，租约过期后自动重新领取
+```
+
+**为什么不能一律重试**：一个永远失败的任务会在队列里无限打转，占着 worker，
+日志刷屏，还掩盖了真正的问题。
+**为什么不能一律不重试**：对方 502 一下就把任务判死，太脆。
+
+**判据是"错在谁"**：4xx = 我们的请求有问题，重试无意义；5xx / 超时 = 对方或网络
+的问题，值得重试。429 特殊对待，归到可重试那边。
+
+**Java 对照**：这就是 MQ 的**死信队列 vs 重新投递**。Spring Retry 里
+`retryOn` / `noRetryOn` 那组配置解决的是同一个问题。
+
+---
+
+## fail closed 还是降级？看它是安全边界还是功能
+
+同一个项目里两处缺配置，处理方式相反，这个对比很好用：
+
+| | 缺配置时 | 为什么 |
+|---|---|---|
+| `github_webhook_secret` | **拒绝所有请求** | 验签是**安全边界**，宁可不可用也不能放行 |
+| `github_token` | **降级成空转发布** | 发布是**功能**，前面入队/Agent/审批都还有意义 |
+
+降级必须**留下痕迹**：`DryRunPublisher` 让状态照常走到 `published`，但
+`pr_url` 留空 —— 空的 pr_url 就是"这次没真发"的标记。降级而不留痕迹，
+等于骗人。
+
+**一句话**：「安全边界 fail closed，功能 fail soft，但降级必须可观测。」
+
+---
+
+## 包的 `__init__.py` 不要做有副作用的导入
+
+踩到的真事：`api/__init__.py` 里写了 `from repopilot.api.app import app`，
+于是任何人 `import repopilot.api.schemas`（只想要一个 DTO）都会连带把整个
+FastAPI 应用和所有路由拉起来，形成
+
+```
+worker/__init__ → worker.bus → api.schemas → api/__init__ → api.app
+                → api.routes → worker（还没初始化完）→ ImportError
+```
+
+**之前一直没炸，纯粹因为所有入口都恰好先 import 了 `repopilot.api`。**
+新加一个测试文件、换个导入顺序就崩。
+
+**Java 对照**：Java 没有这个坑（类加载是惰性的、按需的）。Python 的 `import`
+是**执行整个模块**，所以包的 `__init__` 相当于一段开机自动跑的代码。
+
+**要记什么**：`__init__.py` 里只放常量和纯声明；要 app 就写完整路径
+`from repopilot.api.app import create_app`。多打几个字，换掉一个隐形地雷。
+
+---
+
+## 怎么测一个要联网的功能：切在正确的边界上
+
+发布这一步有两半：**git 操作**和 **GitHub HTTP API**。全 mock 掉等于什么都没测。
+
+做法是**只 mock HTTP，git 用真的**：
+- 造一个本地**裸仓库**（`git init --bare`）当"远端"。裸仓库和 GitHub 在 git
+  协议层面没有区别，所以 clone / apply / commit / push 全是真命令，
+  断言直接读远端裸仓库里的文件内容。
+- HTTP 那半边用 `httpx.MockTransport`，请求体断言得很细，但不联网、不要 token。
+
+**结果**：唯一没被覆盖的只剩"GitHub 服务器本身怎么响应"。
+
+**可测性是设计出来的，不是补出来的**：`GitHubClient` 接受注入的
+`httpx.AsyncClient`，`GitHubPublisher` 接受 `remote_base` ——
+这两个口子存在的唯一目的就是让上面这套测试成立。
+
+---
+
 ## Why a coding agent needs a sandbox
 
 Three distinct risks, three distinct mitigations:

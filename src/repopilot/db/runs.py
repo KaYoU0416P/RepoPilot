@@ -99,19 +99,68 @@ async def claim_next_run(worker_id: str, lease_seconds: int = 120) -> RunRow | N
     return row
 
 
+#: publisher 领取「已批准、待发布」的 run。和 CLAIM_SQL 长得像，但有三处关键差别：
+#:
+#:   1. **不改 status**。publishing 已经是当前状态了，这里只是取得所有权。
+#:      （状态机里也没有 publishing → publishing 的自转边，想改也改不了。）
+#:   2. **不加 attempts**。attempts 是「Agent 执行」的预算，发布是另一码事，
+#:      两者混在一个计数器里会互相污染。
+#:   3. 可领取条件是「没人持有或租约已过期」。审批时会把租约清空
+#:      （见 approvals.decide），所以刚批准的 run 立刻就能被捞到。
+#:
+#: 崩溃重试的安全性不靠这条 SQL，靠分支名当幂等键 —— 见 publishing/github.py。
+CLAIM_PUBLISHING_SQL = """
+    UPDATE runs
+       SET locked_by        = $1,
+           lease_expires_at = now() + make_interval(secs => $2)
+     WHERE id = (
+         SELECT id
+           FROM runs
+          WHERE status = 'publishing'
+            AND (lease_expires_at IS NULL OR lease_expires_at < now())
+          ORDER BY created_at
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+     )
+    RETURNING *
+"""
+
+
+async def claim_next_publishing(worker_id: str, lease_seconds: int = 120) -> RunRow | None:
+    """原子地领取一个待发布的 run；没有就返回 None。"""
+    record = await get_pool().fetchrow(CLAIM_PUBLISHING_SQL, worker_id, lease_seconds)
+    if record is None:
+        return None
+    row = RunRow.from_record(record)
+    log.info("worker=%s 领取待发布 run=%s", worker_id, row.id)
+    return row
+
+
 async def heartbeat(run_id: UUID, worker_id: str, lease_seconds: int = 120) -> bool:
     """续租。Agent 跑得久时定期调用，防止任务被别的 worker 抢走。
 
     `locked_by = $2` 这个条件很重要：如果租约已经被别人抢走，续租必须失败，
     让当前 worker 知道自己已经失去所有权。
+
+    `status IN (...)`：执行阶段和发布阶段用的是同一套租约机制，
+    只是持有者从 worker 换成了 publisher。
     """
     sql = """
         UPDATE runs
            SET lease_expires_at = now() + make_interval(secs => $3)
-         WHERE id = $1 AND locked_by = $2 AND status = 'running'
+         WHERE id = $1 AND locked_by = $2 AND status IN ('running', 'publishing')
     """
     result = await get_pool().execute(sql, run_id, worker_id, lease_seconds)
     return result.endswith(" 1")
+
+
+#: 交还所有权时要写的字段。展开成 `transition(..., **RELEASE_LEASE)`。
+#:
+#: 干完自己那一段就必须放手，而且要和状态流转在**同一条 UPDATE** 里完成。
+#: 分成两条语句的话，中间这一瞬间「状态已经是 publishing、租约还在前一个
+#: worker 手上」，publisher 捞不到，得干等一个租约周期（120 秒）才接手 ——
+#: 表现出来就是「批准之后卡住两分钟」，很难查。
+RELEASE_LEASE = {"locked_by": None, "lease_expires_at": None}
 
 
 async def reap_exhausted() -> int:

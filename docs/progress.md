@@ -34,7 +34,27 @@
 
 ## NOW
 
-**Stage B 第一步 — webhook 入口，完成。98 passed，ruff 全绿。**
+**Stage B 第三步 — 发布链路完成。118 passed，ruff 全绿。**
+**`Issue → Run → 审批 → PR` 整条链路已闭环。**
+
+- `github/client.py`：GitHub REST 客户端（PAT + httpx，不用 SDK，不碰 OAuth）。
+- `publishing/`：`Publisher` 协议 + `GitHubPublisher`（真发）+ `DryRunPublisher`
+  （无 token 时降级，`pr_url` 留空表示"没真发"）。和 `llm/` 一个模式。
+- `Worker._publish_loop`：和领取循环并排跑的第二个循环，
+  `claim_next_publishing` 复用同一套 SKIP LOCKED + 租约。
+- **发布幂等**：分支名 `repopilot/run-<id前8位>` 是确定性的，push 重复是 no-op，
+  开 PR 前先按 head 分支查已有 PR → 崩在任何一步重试都不会开出两个 PR。
+- **失败分两类**：`PublishError`（diff 打不上、4xx）→ 标 failed 不重试；
+  网络抖动 / 5xx → 冒出去，租约过期后自动重试。
+- **交还租约**：`RELEASE_LEASE` 和状态流转在同一条 UPDATE 里，
+  否则批准后 publisher 要干等一个租约周期才接手。
+- schema 加了 `branch` / `pr_url` 两列 + `idx_runs_publishable` 部分索引。
+  测试库会自愈（conftest 检测到缺列就重建），**开发库要 `make db-reset`**。
+- 顺手修了一个循环导入：`api/__init__.py` 原本 re-export `app`，导致
+  `worker.bus → api.schemas → api/__init__ → api.app → api.routes → worker`。
+  之前靠导入顺序侥幸不崩，加个测试文件就踩到了。
+
+### Stage B 第一步 — webhook 入口
 
 - `github/webhook.py`：验签 + 事件解析。刻意不碰数据库和 FastAPI，
   输入 `bytes`/`dict`，输出布尔值和 `IssueTrigger` DTO，所以能当纯函数测。
@@ -48,15 +68,15 @@
 
 ## NEXT
 
-1. **Stage B 第二步**：clone 目标仓库（现在 webhook 入队时 `repo_path` 还是
-   写死的内置样例仓库）。
-2. **Stage B 第三步**：`publishing → published` —— 用 PAT push 分支、开 PR、
-   回写 Issue 评论（靠 `external_ref` 反查回哪个 Issue）。
-3. Docker sandbox：接了陌生仓库之后这条的优先级立刻升到最高。
-4. **Stage C — 评测集**：15 个 seeded bug（含跨文件、含故意无解的），出成功率报表。
-3. Docker sandbox 替换 `sandbox/local.py`（签名不变）。接了 GitHub 之后优先级上升，
-   因为那时要跑陌生仓库的代码。
-4. MCP server，把 repo 工具暴露出去。
+1. **Stage C — 评测集**（收益最高）：15 个 seeded bug，含跨文件的、需要读依赖的、
+   需要改测试的、**故意无解的**（证明 Agent 会放弃而不是瞎改 —— 这就是 retry
+   budget 存在的意义）。产出成功率 / 平均重试 / 平均工具调用 / 失败原因分布。
+2. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
+   内置样例仓库；发布链路本身已经能处理真实 clone（`GitHubPublisher` 就是
+   `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
+3. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
+   **必须排在第 2 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
+4. MCP server，把 repo 工具暴露出去（要自己实现 Server，不是只接别人的）。
 5. OpenTelemetry：每个节点、每个工具一个 span。
 6. README、架构图、简历项目描述。
 
@@ -72,7 +92,11 @@
 - 队列空转靠轮询（默认 1s），不是零延迟。`LISTEN/NOTIFY` 可以解决。
 - sandbox 是本地子进程，不是容器。隔离靠路径收敛 + 超时，不是内核级。
 - API 没有鉴权。
-- `publishing → published` 这一步还没有真正的 PR 创建逻辑（Stage B 第三步）。
+- 发布链路**只在本地裸仓库上验证过**（测试用裸仓库当远端，git 那半边是真的，
+  GitHub API 那半边是 `httpx.MockTransport`）。没打过真实 GitHub 的 API。
+- publisher 的重试**没有次数上限**：`PublishError` 会直接进终态，但如果每次都是
+  进程崩在同一个地方（比如 push 卡到超时），租约过期后会一直重来。
+  `attempts` 是 Agent 执行的预算，没复用给发布。要补的话得加一个独立计数器。
 - webhook 的「登记投递」和「入队 run」**不在同一个事务里**。两者之间崩溃 →
   投递已记账、run 没建成、重投会被判重，事件就丢了。两张表在同一个库，
   技术上完全做得到一个事务，是刻意留的取舍。面试要主动讲这个缺口。

@@ -110,6 +110,21 @@ class IssueTrigger(BaseModel):
         return f"{self.title}\n\n{self.body}".strip()
 
 
+def parse_external_ref(external_ref: str | None) -> tuple[str, int] | None:
+    """`"owner/repo#42"` → `("owner/repo", 42)`，格式不对就 None。
+
+    `IssueTrigger.external_ref` 的逆运算。发布阶段靠它知道该往哪个仓库开 PR、
+    往哪个 Issue 回评论 —— 也就是说 runs 表里那一个 text 字段，就是 Agent
+    和 GitHub 之间的全部关联。
+    """
+    if not external_ref or "#" not in external_ref:
+        return None
+    repo, _, number = external_ref.rpartition("#")
+    if repo.count("/") != 1 or not number.isdigit():
+        return None
+    return repo, int(number)
+
+
 def extract_issue_trigger(
     payload: dict[str, Any], *, trigger_label: str
 ) -> IssueTrigger | None:

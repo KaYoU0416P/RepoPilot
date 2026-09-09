@@ -44,6 +44,11 @@ class RunResponse(BaseModel):
     evaluation: dict[str, Any] | None = None
     error: str | None = None
 
+    #: 发布产物。status 是 published 但 pr_url 为空 = 走的空转发布器，
+    #: 没有真的 PR。别让人误以为 PR 开好了。
+    branch: str | None = None
+    pr_url: str | None = None
+
     attempts: int = 0
     retry_count: int = 0
     created_at: datetime
@@ -65,6 +70,8 @@ class RunResponse(BaseModel):
             steps=row.step_log,
             evaluation=row.evaluation,
             error=row.error,
+            branch=row.branch,
+            pr_url=row.pr_url,
             attempts=row.attempts,
             retry_count=row.retry_count,
             created_at=row.created_at,

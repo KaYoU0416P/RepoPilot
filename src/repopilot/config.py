@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     #: Issue 打上这个标签才算授权 Agent 动手。默认不响应任何 Issue。
     github_trigger_label: str = "repopilot"
     github_api_url: str = "https://api.github.com"
+    #: push 的目标前缀，拼成 `<base>/<owner>/<repo>.git`。
+    #: 测试里指向本地裸仓库，于是 clone/push 走的是真 git，只有 HTTP 被替换。
+    git_remote_base: str = "https://github.com"
+    #: clone / apply / push 的墙钟超时。比工具超时长：clone 可能真的要一会儿。
+    publish_timeout_seconds: float = 120.0
 
 
 @lru_cache

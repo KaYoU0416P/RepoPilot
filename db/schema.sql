@@ -46,6 +46,13 @@ CREATE TABLE runs (
     retry_count      int            NOT NULL DEFAULT 0,
     error            text,
 
+    -- ---- 发布产物（Stage B 第三步）----
+    -- branch 是**确定性**的（repopilot/run-<id前8位>），这一点很重要：
+    -- publisher 在推送前崩了，重试时算出的分支名完全一样，
+    -- 于是「这个分支有没有已经开过 PR」就能当幂等键用，不会开出两个 PR。
+    branch           text,
+    pr_url           text,
+
     -- ---- 队列 / 租约（可靠性的核心）----
     attempts         int            NOT NULL DEFAULT 0,
     max_attempts     int            NOT NULL DEFAULT 3,
@@ -63,6 +70,12 @@ CREATE TABLE runs (
 CREATE INDEX idx_runs_claimable
     ON runs (created_at)
     WHERE status IN ('queued', 'running');
+
+-- publisher 的领取索引。和上面分开，因为两个循环捞的是完全不同的两批行：
+-- worker 捞 queued/running，publisher 捞 publishing。
+CREATE INDEX idx_runs_publishable
+    ON runs (created_at)
+    WHERE status = 'publishing';
 
 CREATE INDEX idx_runs_status_created ON runs (status, created_at DESC);
 CREATE INDEX idx_runs_external_ref   ON runs (external_ref) WHERE external_ref IS NOT NULL;

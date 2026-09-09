@@ -12,7 +12,7 @@ from uuid import UUID
 
 from repopilot.db.models import ApprovalRow
 from repopilot.db.pool import get_pool, transaction
-from repopilot.db.runs import transition
+from repopilot.db.runs import RELEASE_LEASE, transition
 from repopilot.domain import RunStatus
 from repopilot.observability import get_logger
 
@@ -38,7 +38,10 @@ async def decide(
 
     # 先流转状态（内含守卫 + 乐观锁）。非法流转会在这里抛出来，
     # 这样不会留下一条「审批了但状态没动」的孤儿记录。
-    await transition(run_id, target, expected=RunStatus.PENDING_APPROVAL)
+    #
+    # RELEASE_LEASE：批准这一刻把租约清空，publisher 才能立刻捞到这一行。
+    # 不清的话，跑 Agent 时留下的那份租约还没到期，发布就白等两分钟。
+    await transition(run_id, target, expected=RunStatus.PENDING_APPROVAL, **RELEASE_LEASE)
 
     async with transaction() as conn:
         record = await conn.fetchrow(

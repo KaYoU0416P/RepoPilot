@@ -42,8 +42,18 @@ Worker.run_forever            worker/worker.py       ← 后台常驻
         └─▶ transition(PENDING_APPROVAL 或 FAILED)   ← 成功不等于结束
 
 POST /runs/{id}/approval      approvals_repo.decide
-  ├─▶ transition(PUBLISHING / REJECTED)   守卫 + 乐观锁
+  ├─▶ transition(PUBLISHING / REJECTED)   守卫 + 乐观锁 + 交还租约
   └─▶ INSERT approvals                    追加写，保留审批历史
+
+Worker._publish_loop           worker/worker.py       ← 和领取循环并排跑
+  ├─▶ claim_next_publishing    同一套 SKIP LOCKED + 租约，只是捞 publishing
+  └─▶ GitHubPublisher.publish  publishing/github.py
+        ├─▶ git clone repo_path → 建确定性分支 → apply(runs.diff) → commit
+        ├─▶ git push            重复推同样的提交是 no-op，天然幂等
+        ├─▶ find_pull_request   ★分支名当幂等键，已有 PR 就复用不重开
+        ├─▶ create_pull_request
+        └─▶ comment_on_issue    靠 external_ref 知道回哪个 Issue
+      └─▶ transition(PUBLISHED, pr_url=...)  或 PublishError → FAILED
 
 GET /runs/{id}/events         SSE，每个节点完成推一帧
 GET /runs/{id}                最终 diff + evaluation
@@ -70,7 +80,8 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | 模块 | 负责 | 不知道 |
 |---|---|---|
 | `api/` | HTTP、DTO、SSE | LangGraph 内部、SQL |
-| `github/` | webhook 验签、事件解析 | 数据库、FastAPI |
+| `github/` | webhook 验签、事件解析、REST 客户端 | 数据库、FastAPI |
+| `publishing/` | 建分支、push、开 PR、回写评论 | 队列、状态机 |
 | `domain/` | 状态机 | 数据库、HTTP |
 | `db/` | 表结构、仓储、队列 SQL | Agent、工具 |
 | `worker/` | 领取循环、限流、租约、事件总线 | 具体在跑什么图 |
@@ -104,6 +115,8 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | 长任务不被抢 | 心跳续租，失去所有权时续租失败 | 消费者续期 |
 | 无限重试 | `attempts < max_attempts` + reaper 标记失败 | 死信队列 |
 | 重复触发 | `webhook_deliveries` 唯一约束 | 幂等键 |
+| 重复开 PR | 确定性分支名 + 开 PR 前先查同 head 的 PR | 幂等键（业务层） |
+| 发布失败分类 | `PublishError` → 不重试；其他异常 → 租约过期后重试 | 死信 vs 重投 |
 | 并发写冲突 | `UPDATE ... WHERE status = 当前状态` | 乐观锁 / @Version |
 | 优雅停机 | 停止领新任务 → 等在跑的收尾 → 超时取消，靠租约回收 | 优雅下线 |
 
@@ -129,10 +142,19 @@ Agent 自己说成功不算数，必须有人看过 diff。
 > 硬编码规则表，存在的意义是让整个图能离线跑测试、不花 token。它「解决」的问题
 > 只证明流水线是通的，不证明模型聪明。没有 `ANTHROPIC_API_KEY` 时会自动降级到它。
 
+`publishing/build_publisher()` 同理：没有 `GITHUB_TOKEN` 时降级成 `DryRunPublisher`，
+状态照样走到 `published`，但 **`pr_url` 是空的** —— 空的 pr_url 就是「这次没真发」的标记。
+
+**两种缺配置的处理为什么不一样**：webhook 验签缺密钥直接拒绝（fail closed），
+发布缺 token 降级继续。因为**验签是安全边界，发布是功能**。安全边界宁可不可用，
+功能宁可降级。这条区分要能主动讲。
+
 ## 当前状态
 
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
-worker 租约与限流、SSE、评测指标、75 个测试。
+worker 租约与限流、SSE、评测指标、GitHub webhook 入口、发布链路（PR + 评论），
+118 个测试。**`Issue → Run → 审批 → PR` 整条链路已闭环。**
 
-**未完成**：GitHub 接入（Stage B）、评测基准集（Stage C）、Docker sandbox、
-MCP server、OpenTelemetry、API 鉴权。详见 `docs/progress.md`。
+**未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、
+评测基准集（Stage C）、Docker sandbox、MCP server、OpenTelemetry、API 鉴权。
+详见 `docs/progress.md`。

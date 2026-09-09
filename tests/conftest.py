@@ -38,8 +38,18 @@ def registry():
     return build_registry()
 
 
+#: schema.sql 改了之后，用来判断测试库是不是还停在老版本上。
+#: 加了新列就把这里改成新列名 —— 比记得手动 `make db-reset` 可靠。
+_SCHEMA_MARKER = ("runs", "pr_url")
+
+
 async def _ensure_test_database() -> None:
-    """测试库不存在就建一个并灌 schema。第一次跑测试时自动完成。"""
+    """测试库不存在就建一个并灌 schema；schema 过期就整个重建。
+
+    自愈而不是报错，是因为「测试库落后于 schema.sql」是开发期天天发生的事，
+    每次都手动 `make db-reset` 迟早会忘，然后得到一堆看不懂的 UndefinedColumnError。
+    生产环境当然不能这么干 —— 那里要的是真正的迁移工具。
+    """
     try:
         conn = await asyncpg.connect(TEST_DSN)
     except asyncpg.InvalidCatalogNameError:
@@ -51,8 +61,21 @@ async def _ensure_test_database() -> None:
         conn = await asyncpg.connect(TEST_DSN)
 
     try:
-        exists = await conn.fetchval("SELECT to_regclass('public.runs')")
-        if exists is None:
+        table, column = _SCHEMA_MARKER
+        up_to_date = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+            )
+            """,
+            table,
+            column,
+        )
+        if not up_to_date:
+            # DROP SCHEMA 一并干掉表、ENUM 类型和索引；只 DROP TABLE 会留下
+            # run_status 这些自定义类型，重灌 schema 时报 "type already exists"。
+            await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
             await conn.execute(read_schema(SCHEMA_FILE))
     finally:
         await conn.close()

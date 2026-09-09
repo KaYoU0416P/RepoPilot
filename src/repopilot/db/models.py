@@ -31,6 +31,9 @@ class RunRow(BaseModel):
     retry_count: int = 0
     error: str | None = None
 
+    branch: str | None = None
+    pr_url: str | None = None
+
     attempts: int = 0
     max_attempts: int = 3
     locked_by: str | None = None

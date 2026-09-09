@@ -96,6 +96,9 @@ class Runner:
                     step_log=state.get("step_log") or [],
                     files_changed=state.get("files_changed") or [],
                     retry_count=state.get("retry_count", 0),
+                    # 我们这段活干完了，租约交还。不交的话 publisher 要等它
+                    # 自然过期才能接手，人一批准就卡住两分钟。
+                    **runs_repo.RELEASE_LEASE,
                 )
                 emit(
                     "run_finished",
@@ -117,6 +120,7 @@ class Runner:
                     retry_count=state.get("retry_count", 0),
                     error=f"agent 未能完成任务: {report.failure_reason}",
                     finished_at=datetime.now(UTC),
+                    **runs_repo.RELEASE_LEASE,
                 )
                 emit("run_error", message=f"失败: {report.failure_reason}")
 
