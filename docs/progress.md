@@ -2,47 +2,68 @@
 
 ## DONE
 
-- Project skeleton: uv + pyproject, src layout, ruff, pytest (asyncio_mode=auto).
-- `workspace/`: per-run `copytree` + git baseline commit, `resolve()` path confinement.
-- `sandbox/local.py`: no-shell subprocess, wall-clock timeout, process-group kill.
-- `tools/`: 5 of 6 tools working — `list_files`, `read_file`, `write_file`, `git_diff`,
-  `run_tests`. Registry enforces timeout + `asyncio.Semaphore` concurrency cap and turns
-  every failure into `ToolResult(ok=False)`.
-- `llm/`: `LLMClient` Protocol, `AnthropicLLM` (structured output via forced tool use),
-  `ScriptedLLM` deterministic double.
-- `agent/`: `AgentState` TypedDict with `operator.add` reducers, six nodes, conditional
-  retry edge, compiled graph.
-- `api/`: `POST /runs` (202 + background task), `GET /runs/{id}`, `GET /runs/{id}/events`
-  (SSE), `POST /runs/{id}/cancel`, `GET /health`.
-- `evaluation/`: task success, tool selection histogram, retry count, diff validity,
-  failure reason.
-- 26 passing tests. Full loop verified end-to-end over real HTTP + SSE.
+### Stage 0 — Agent MVP
+- uv + pyproject，src 布局，ruff，pytest（asyncio_mode=auto）。
+- `workspace/`：每次运行 `copytree` 一份仓库副本 + git baseline commit，`resolve()` 做路径收敛。
+- `sandbox/local.py`：不过 shell 的子进程、墙钟超时、按进程组 kill。
+- `tools/`：6 个工具（`search_code` 待手写）。注册表统一加超时 + `asyncio.Semaphore`
+  并发上限，并把任何异常降级成 `ToolResult(ok=False)`。
+- `llm/`：`LLMClient` Protocol、`AnthropicLLM`（强制 tool use 拿结构化输出）、
+  `ScriptedLLM` 确定性测试替身。
+- `agent/`：`AgentState` TypedDict + `operator.add` reducer，6 个节点，重试条件边。
+- `evaluation/`：任务成功率、工具选择分布、重试次数、diff 有效性、失败原因。
+
+### Stage A — 业务层（骨架完成，3 处待手写）
+- **PostgreSQL 17 + pgvector**（`docker-compose.yml`，端口 5433，复用本机已有镜像）。
+- `db/schema.sql`：3 张表 —— `runs`（兼任队列）、`webhook_deliveries`（幂等台账）、
+  `approvals`（审批流水）。用到 PG 独有的 ENUM 类型、`jsonb`、原生数组、**部分索引**。
+- `domain/status.py`：9 状态的状态机，流转表是唯一真相来源，终态从表推导。
+- `db/runs.py`：入队、**领取（租约 + SKIP LOCKED）**、心跳续租、僵尸回收、
+  带乐观锁的状态流转。
+- `db/deliveries.py`：webhook 幂等去重。
+- `db/approvals.py`：审批决策追加写 + 推动状态，与流转同事务。
+- `worker/`：事件总线（SSE 用）、Runner（跑一个 run）、Worker（领取循环 +
+  进程内并发上限 + 优雅停机 + reaper）。
+- `api/`：`POST /runs` 改成**只入队**立刻返回 202；新增 `GET /runs`、
+  `POST /runs/{id}/approval`、`GET /runs/{id}/approvals`；`/health` 带队列深度。
+- 真实 HTTP 验证通过：入队 → worker 领取 → Agent 修好 → `pending_approval`
+  → 批准 → `publishing`；重复批准返回 409；审批流水可查。
 
 ## NOW
 
-- **Handwrite task: `search_code` in `src/repopilot/tools/fs_tools.py`.**
-  Contract + 6 red tests already in `tests/test_search_code.py`.
-- Read the main call chain in the order listed in `docs/architecture.md`.
+**4 个手写任务，按这个顺序做**（红灯数量已实测）：
+
+| 顺序 | 位置 | 量 | 解锁 |
+|---|---|---|---|
+| 1 | `domain/status.py::can_transition` | 1 行 | 16 + 6 个用例 |
+| 2 | `db/deliveries.py::CLAIM_DELIVERY_SQL` | 4 行 SQL | 7 个用例 |
+| 3 | `db/runs.py::CLAIM_SQL` | ~17 行 SQL（最难） | 11 个用例 |
+| 4 | `tools/fs_tools.py::search_code` | ~25 行 Python | 5 个用例 |
+
+全部完成后：`make test` 应该 **75 passed**。
 
 ## NEXT
 
-1. Handwrite `AgentState` from scratch (delete + retype `state.py`) to internalise
-   TypedDict + reducers.
-2. asyncio deep dive: write a minimal concurrent tool runtime with `gather`,
-   `Semaphore`, `wait_for`, and task cancellation.
-3. MCP server exposing `read_file` / `search_code` / `git_diff` / `run_tests`.
-4. Docker sandbox replacing `sandbox/local.py` (same signature).
-5. OpenTelemetry spans per node and per tool.
-6. README, architecture diagram, resume bullet points.
+1. **Stage B — GitHub 接入**：webhook 验签、Issue → 入队、开 PR、回写评论。
+   幂等台账已经就位，接上去即可。
+2. **Stage C — 评测集**：15 个 seeded bug（含跨文件、含故意无解的），出成功率报表。
+3. Docker sandbox 替换 `sandbox/local.py`（签名不变）。接了 GitHub 之后优先级上升，
+   因为那时要跑陌生仓库的代码。
+4. MCP server，把 repo 工具暴露出去。
+5. OpenTelemetry：每个节点、每个工具一个 span。
+6. README、架构图、简历项目描述。
 
 ## BLOCKED
 
-- Nothing.
+- 无。
 
-## KNOWN GAPS (be honest about these in interviews)
+## 已知缺口（面试要主动说，别等人问）
 
-- Run store is in-memory; a restart loses history. No DB yet.
-- Sandbox is a local subprocess, not a container. Isolation is path + timeout, not
-  kernel-level. Docker is the next step.
-- No auth on the API.
-- Evaluation is single-run; there is no benchmark suite of tasks yet.
+- 事件总线是**进程内**的。API 和 worker 拆进程后 SSE 会收不到事件；
+  真要拆得换 Redis pub/sub 或 PG 的 `LISTEN/NOTIFY`。业务正确性不受影响 ——
+  真相在数据库里，轮询 `GET /runs/{id}` 结果一样。
+- 队列空转靠轮询（默认 1s），不是零延迟。`LISTEN/NOTIFY` 可以解决。
+- sandbox 是本地子进程，不是容器。隔离靠路径收敛 + 超时，不是内核级。
+- API 没有鉴权。
+- `publishing → published` 这一步还没有真正的 PR 创建逻辑（Stage B）。
+- 评测只有单次运行，还没有任务基准集。

@@ -36,6 +36,29 @@ class Settings(BaseSettings):
     workspace_root: Path = PROJECT_ROOT / ".workspaces"
     sample_repo: Path = PROJECT_ROOT / "fixtures" / "sample_repo"
 
+    # --- 数据库 ---
+    database_url: str = "postgresql://repopilot:repopilot@localhost:5433/repopilot"
+    db_pool_min: int = 2
+    db_pool_max: int = 10
+
+    # --- Worker / 队列 ---
+    #: 同时最多跑几个 Agent。和工具级并发是乘的关系，别调太大。
+    max_concurrent_runs: int = 2
+    #: 租约时长。worker 崩了之后，任务要等这么久才会被别人接手。
+    lease_seconds: int = 120
+    #: 队列空转时的轮询间隔。
+    poll_interval_seconds: float = 1.0
+    #: 优雅停机最多等多久。
+    shutdown_grace_seconds: float = 30.0
+    #: 单个任务最多被领取几次（含首次）。
+    max_attempts: int = 3
+    #: 关掉后 API 只入队不执行，方便单独起 worker 进程。
+    enable_worker: bool = True
+
+    # --- GitHub（Stage B）---
+    github_token: str = ""
+    github_webhook_secret: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

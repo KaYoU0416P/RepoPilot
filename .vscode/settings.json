@@ -1,0 +1,34 @@
+{
+  // 关键一行：告诉 VSCode 用项目自己的 .venv，而不是系统 Python 3.9。
+  // 配错这一行 = 满屏红波浪线 + import 全部报错。
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+
+  // 让 VSCode 能找到 src/ 下的包（和 pyproject.toml 里的 pythonpath 对应）
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+  "python.analysis.typeCheckingMode": "basic",
+
+  // 测试面板：左侧烧杯图标里能直接点着跑 pytest
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests"],
+
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    },
+    // Python 的灵魂：4 个空格缩进，绝对不要用 Tab
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    // 第 100 列画一条竖线，和 ruff 的 line-length = 100 对齐
+    "editor.rulers": [100]
+  },
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/.workspaces": true
+  }
+}

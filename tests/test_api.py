@@ -1,80 +1,198 @@
-"""HTTP-level tests using an ASGI transport - no real socket, no uvicorn."""
+"""HTTP 层测试。用 ASGI transport，不开真实端口、不起 uvicorn。"""
 
-import asyncio
-import json
+from uuid import UUID
 
 import httpx
 import pytest
 
 from repopilot.api.app import create_app
+from repopilot.db import runs as runs_repo
+from repopilot.domain import RunStatus
+
+pytestmark = pytest.mark.usefixtures("db")
 
 
 @pytest.fixture
-async def client():
+async def client(db, monkeypatch):
+    """API 单独测：关掉 worker，避免它把刚入队的任务领走，测试变得不确定。"""
+    from repopilot.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "enable_worker", False)
+
     app = create_app()
+    app.state.bus = __import__(
+        "repopilot.worker", fromlist=["EventBus"]
+    ).EventBus()
+    app.state.worker = None
+    app.state.worker_task = None
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        async with app.router.lifespan_context(app):
-            yield c
+        yield c
 
 
-async def test_health(client):
-    response = await client.get("/health")
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+# ------------------------------------------------------------------ health
+async def test_health_reports_database_and_queue(client):
+    body = (await client.get("/health")).json()
+    assert body["status"] == "ok"
+    assert body["database"] == "ok"
+    assert "queue" in body
 
 
-async def test_create_run_returns_202_immediately(client):
-    response = await client.post("/runs", json={"task": "fix the divide bug"})
+# -------------------------------------------------------------------- 入队
+async def test_create_run_enqueues_and_returns_202(client):
+    response = await client.post("/runs", json={"task": "修一下除零的 bug"})
     assert response.status_code == 202
+
     body = response.json()
-    assert body["run_id"]
+    assert body["status"] == "queued"
     assert body["events_url"] == f"/runs/{body['run_id']}/events"
+
+    # 真的落库了，而不是只在内存里
+    row = await runs_repo.get_run(body["run_id"])
+    assert row is not None
+    assert row.status == RunStatus.QUEUED
 
 
 async def test_validation_rejects_short_task(client):
     assert (await client.post("/runs", json={"task": "x"})).status_code == 422
 
 
-async def test_unknown_run_is_404(client):
-    assert (await client.get("/runs/deadbeef")).status_code == 404
-
-
 async def test_bad_repo_path_is_400(client):
     response = await client.post(
-        "/runs", json={"task": "do something", "repo_path": "/nope/nowhere"}
+        "/runs", json={"task": "做点什么", "repo_path": "/nope/nowhere"}
     )
     assert response.status_code == 400
 
 
-@pytest.mark.slow
-async def test_sse_stream_reports_every_node(client):
-    created = (await client.post("/runs", json={"task": "fix divide by zero"})).json()
-    run_id = created["run_id"]
+async def test_unknown_run_is_404(client):
+    assert (
+        await client.get("/runs/00000000-0000-0000-0000-000000000000")
+    ).status_code == 404
 
-    nodes: list[str] = []
-    async with client.stream("GET", f"/runs/{run_id}/events", timeout=120) as stream:
+
+async def test_list_runs_filters_by_status(client):
+    await client.post("/runs", json={"task": "任务甲"})
+    await client.post("/runs", json={"task": "任务乙"})
+
+    queued = (await client.get("/runs", params={"status": "queued"})).json()
+    assert len(queued) == 2
+
+    running = (await client.get("/runs", params={"status": "running"})).json()
+    assert running == []
+
+
+# -------------------------------------------------------------- 审批闸门
+async def test_cannot_approve_a_run_that_is_still_queued(client):
+    """审批闸门的核心：没跑完的任务不能批准。返回 409 而不是 500。"""
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+
+    response = await client.post(
+        f"/runs/{run_id}/approval",
+        json={"decision": "approved", "decided_by": "kayou"},
+    )
+    assert response.status_code == 409
+
+
+async def test_approve_moves_run_to_publishing(client):
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    await _force_status(run_id, RunStatus.PENDING_APPROVAL)
+
+    response = await client.post(
+        f"/runs/{run_id}/approval",
+        json={"decision": "approved", "decided_by": "kayou", "reason": "看过 diff 了"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "publishing"
+
+    history = (await client.get(f"/runs/{run_id}/approvals")).json()
+    assert len(history) == 1
+    assert history[0]["decided_by"] == "kayou"
+    assert history[0]["reason"] == "看过 diff 了"
+
+
+async def test_reject_is_terminal(client):
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    await _force_status(run_id, RunStatus.PENDING_APPROVAL)
+
+    rejected = await client.post(
+        f"/runs/{run_id}/approval",
+        json={"decision": "rejected", "decided_by": "kayou", "reason": "改错地方了"},
+    )
+    assert rejected.json()["status"] == "rejected"
+
+    # 驳回是终态，不能再批准
+    again = await client.post(
+        f"/runs/{run_id}/approval",
+        json={"decision": "approved", "decided_by": "kayou"},
+    )
+    assert again.status_code == 409
+
+
+async def test_double_approval_is_rejected(client):
+    """幂等的另一面：同一个 run 不能被批准两次，否则会开出两个 PR。"""
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    await _force_status(run_id, RunStatus.PENDING_APPROVAL)
+
+    body = {"decision": "approved", "decided_by": "kayou"}
+    assert (await client.post(f"/runs/{run_id}/approval", json=body)).status_code == 200
+    assert (await client.post(f"/runs/{run_id}/approval", json=body)).status_code == 409
+
+
+async def test_invalid_decision_is_422(client):
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    response = await client.post(
+        f"/runs/{run_id}/approval", json={"decision": "maybe", "decided_by": "kayou"}
+    )
+    assert response.status_code == 422
+
+
+# -------------------------------------------------------------------- 取消
+async def test_cancel_queued_run(client):
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    response = await client.post(f"/runs/{run_id}/cancel")
+    assert response.status_code == 202
+    assert response.json()["status"] == "cancelled"
+
+
+async def test_cannot_cancel_a_published_run(client):
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    await _force_status(run_id, RunStatus.PUBLISHED)
+
+    assert (await client.post(f"/runs/{run_id}/cancel")).status_code == 409
+
+
+# --------------------------------------------------------------------- SSE
+async def test_sse_on_a_finished_run_closes_immediately(client):
+    """终态的 run 没有后续事件，流要立刻结束，不能让客户端一直挂着。"""
+    run_id = (await client.post("/runs", json={"task": "修 bug"})).json()["run_id"]
+    await client.post(f"/runs/{run_id}/cancel")
+
+    lines = []
+    async with client.stream("GET", f"/runs/{run_id}/events", timeout=10) as stream:
         async for line in stream.aiter_lines():
-            if not line.startswith("data: "):
-                continue
-            payload = json.loads(line[6:])
-            if not payload:
-                break
-            if payload.get("type") == "node_completed":
-                nodes.append(payload["node"])
-            if payload.get("type") in ("run_finished", "run_error"):
-                break
-
-    assert nodes[:4] == ["analyze", "plan", "execute", "run_tests"]
-    assert "finish" in nodes
-
-    final = (await client.get(f"/runs/{run_id}")).json()
-    assert final["status"] == "succeeded"
-    assert final["evaluation"]["task_success"] is True
+            lines.append(line)
+    assert any("event: done" in line for line in lines)
 
 
-@pytest.mark.slow
-async def test_cancel_marks_the_run_as_error(client):
-    run_id = (await client.post("/runs", json={"task": "fix divide by zero"})).json()["run_id"]
-    await asyncio.sleep(0)
-    assert (await client.post(f"/runs/{run_id}/cancel")).status_code == 202
+#: 正常路径。测试要把 run 推到某个状态时，必须沿着合法边一步步走 ——
+#: 状态机不给「测试后门」，这本身就是它的价值。
+_HAPPY_PATH = [
+    RunStatus.QUEUED,
+    RunStatus.RUNNING,
+    RunStatus.PENDING_APPROVAL,
+    RunStatus.PUBLISHING,
+    RunStatus.PUBLISHED,
+]
+
+
+async def _force_status(run_id: str, target: RunStatus) -> None:
+    """测试专用：沿合法路径把 run 推到 target，跳过真正跑 Agent。"""
+    uid = UUID(run_id)
+    stop = _HAPPY_PATH.index(target)
+    while True:
+        row = await runs_repo.get_run(uid)
+        current = _HAPPY_PATH.index(row.status)
+        if current >= stop:
+            return
+        await runs_repo.transition(uid, _HAPPY_PATH[current + 1])
