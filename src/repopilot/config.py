@@ -54,7 +54,15 @@ class Settings(BaseSettings):
     #: 默认走 beta 通道：`strict`（保证 tool_call 参数符合 JSON Schema）只在那里有。
     #: 换成 Qwen / Kimi / GLM 的兼容端点也是改这一项。
     deepseek_base_url: str = "https://api.deepseek.com/beta"
-    max_tokens: int = 4096
+    #: 单次回复的输出上限。
+    #:
+    #: ★**思考模型要留出思考的预算**。4096 是照 Anthropic 非思考模式调的，
+    #: 搬到常驻思考模式的 DeepSeek V4 上直接不够用：思考过程本身就烧 output
+    #: token，`execute` 节点还要整文件重写。真实评测里撞到过一次
+    #: `finish_reason=length` —— 表现不是报错，是**回复被截断成半个 JSON**，
+    #: 于是既没有 tool_call 也没有能解析的正文，整个 run 死在 `analyze`。
+    #: DeepSeek V4 的输出上限是 384K，16384 只是个宽松得多的护栏。
+    max_tokens: int = 16384
 
     #: 模型单价表。**查不到的模型返回的成本是 `None` 而不是 0** ——
     #: 把「不知道」报成「免费」是成本报表最容易骗到自己的地方。

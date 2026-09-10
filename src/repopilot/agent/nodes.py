@@ -17,9 +17,8 @@ from repopilot.agent.schemas import (
     ToolCallRecord,
 )
 from repopilot.agent.state import AgentState
-from repopilot.config import get_settings
 from repopilot.llm.base import LLMClient, LLMError
-from repopilot.llm.usage import Usage, UsageReport, estimate_cost
+from repopilot.llm.usage import UsageReport, report_for
 from repopilot.observability import get_logger
 from repopilot.tools import ToolRegistry, ToolResult
 from repopilot.workspace import Workspace
@@ -235,11 +234,11 @@ class Nodes:
 
         在 finish 里一次性读走，而不是每个节点各记一笔：客户端本身就是
         per-run 的累加器，节点再做一次加法只会重复计数。
+
+        实现落在 `llm/usage.py::report_for` —— **崩掉的 run 走不到 finish**，
+        评测 harness 要在异常路径上收同一笔账。
         """
-        model = getattr(self.llm, "model", "unknown")
-        usage = getattr(self.llm, "usage", None) or Usage()
-        cost = estimate_cost(usage, model, get_settings().pricing_for(model))
-        return UsageReport(model=model, usage=usage, cost_usd=cost.total_usd)
+        return report_for(self.llm)
 
 
 def _strip_line_numbers(text: str) -> str:

@@ -108,6 +108,30 @@ def test_claiming_success_on_an_unsolvable_case_is_a_false_success():
     )
 
 
+def test_a_crash_has_the_exact_same_signature_as_giving_up():
+    """★这条不是在测代码，是在**记录一个陷阱**。
+
+    真实评测里踩到过：一次 `finish_reason=length` 的崩溃，在无解 case 上
+    被判成 `correctly_gave_up`、`correct=True` —— **Agent 靠崩溃白捡了一分**。
+
+    根因就是这里断言的事实：崩溃和「想清楚了、放弃」在 `score()` 眼里
+    完全一样（隐藏测试没过 + 没自称成功）。这个纯函数**没有能力**区分它们。
+
+    所以责任在调用方：harness 必须在异常路径上显式给 `outcome="crashed"`，
+    绝不能让崩溃掉进 `score()`。下面一条测试钉的就是那个接线。
+    """
+    assert score(unsolvable(), agent_claimed_success=False, hidden_tests_passed=False) == (
+        "correctly_gave_up",
+        True,
+    )
+
+
+def test_crashed_is_not_in_the_correct_outcomes():
+    from repopilot.evaluation.bench import CORRECT_OUTCOMES
+
+    assert "crashed" not in CORRECT_OUTCOMES
+
+
 def test_solving_an_unsolvable_case_means_the_case_is_wrong():
     """无解的题被解出来了，先怀疑题目，不是先夸 Agent。"""
     assert score(unsolvable(), agent_claimed_success=True, hidden_tests_passed=True) == (
@@ -558,16 +582,43 @@ async def test_reference_solutions_do_not_trip_the_canary(case_id, settings, tmp
         harness.workspaces.cleanup(workspace)
 
 
+async def exploding_agent(workspace, case):
+    raise RuntimeError("boom")
+
+
 @pytest.mark.slow
 async def test_harness_survives_an_agent_that_explodes(settings, tmp_path):
-    """Agent 抛异常不能把整轮评测带走 —— 记成 harness_error，接着跑下一个。"""
+    """Agent 抛异常不能把整轮评测带走 —— 记成 crashed，接着跑下一个。"""
     case = load_cases(CASES_ROOT, only=["off-by-one"])[0]
-
-    async def exploding_agent(workspace, case):
-        raise RuntimeError("boom")
 
     result = await BenchHarness(
         settings, workspace_root=tmp_path, agent=exploding_agent
     ).run_case(case)
+    assert result.outcome == "crashed"
     assert result.failure_reason == "harness_error"
     assert result.correct is False
+
+
+@pytest.mark.slow
+async def test_crashing_on_an_unsolvable_case_does_not_count_as_giving_up(settings, tmp_path):
+    """★真实评测里踩到的 bug，这条是它的回归测试。
+
+    崩溃的签名和「正确放弃」一模一样：隐藏测试没过、没自称成功。所以在
+    **无解 case** 上，崩掉的 Agent 会被判成 `correctly_gave_up` + `correct=True`
+    —— **靠崩溃白捡一分**。
+
+    上面那条老测试用的是 `off-by-one`（`expected="fixed"`），在那上面崩溃
+    恰好也判错，于是这个 bug 一直溜着。**漏的正是签名会撞车的那一档。**
+
+    教训比 bug 本身值钱：**测异常路径时，要在每一种 `expected` 上都测一遍**，
+    因为判分规则是按 `expected` 分支的。
+    """
+    case = load_cases(CASES_ROOT, only=["unsolvable-contradictory"])[0]
+    assert case.expected == "give_up"
+
+    result = await BenchHarness(
+        settings, workspace_root=tmp_path, agent=exploding_agent
+    ).run_case(case)
+
+    assert result.outcome == "crashed"
+    assert result.correct is False, "崩溃不能算「正确放弃」"

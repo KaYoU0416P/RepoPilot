@@ -25,6 +25,7 @@ from repopilot.config import Settings
 from repopilot.evaluation.bench import BenchCase, BenchReport, CaseResult, aggregate, score
 from repopilot.evaluation.metrics import evaluate_run
 from repopilot.llm import build_llm
+from repopilot.llm.usage import UsageReport, report_for
 from repopilot.observability import get_logger
 from repopilot.sandbox import run_command
 from repopilot.tools import build_registry
@@ -48,6 +49,9 @@ class BenchHarness:
         self.settings = settings
         self.workspaces = WorkspaceManager(workspace_root or settings.workspace_root / "bench")
         self.agent = agent or self._default_agent
+        #: 上一个 case 用的 LLM 客户端。只为崩溃路径收割用量，见 `_default_agent`。
+        #: 注入了自定义 agent 时它一直是 None —— 所以读它的地方必须容忍 None。
+        self._last_llm: object | None = None
 
     # ------------------------------------------------------------------ 主流程
     async def run_case(self, case: BenchCase) -> CaseResult:
@@ -66,10 +70,17 @@ class BenchHarness:
                 log.exception("case=%s Agent 抛异常", case.id)
                 return self._result(
                     case,
+                    # ★必须显式给 outcome。不给的话会掉进 score()，而崩溃的签名
+                    # （隐藏测试没过 + 没自称成功）和「正确放弃」一模一样 ——
+                    # 无解 case 上一崩就白捡一分。真踩过。
+                    outcome="crashed",
                     agent_claimed_success=False,
                     hidden_tests_passed=False,
                     failure_reason="harness_error",
                     detail=f"{type(exc).__name__}: {exc}",
+                    # 崩了照样要报账 —— 不然一个崩掉的 case 就能把整轮的
+                    # 总成本拖成 `None`（"一个算不出，总额就报 None"是刻意的）。
+                    usage=report_for(self._last_llm) if self._last_llm else UsageReport(),
                     duration_ms=int((time.perf_counter() - started) * 1000),
                 )
 
@@ -204,7 +215,10 @@ class BenchHarness:
 
     # ------------------------------------------------------------------ 内部
     async def _default_agent(self, workspace: Workspace, case: BenchCase) -> AgentState:
-        graph = build_graph(build_llm(), build_registry(), workspace)
+        # 客户端存一份在 self 上：崩掉的 run 走不到 finish 节点，用量就收不上来，
+        # 而崩掉的 run 恰恰是最该知道花了多少钱的 —— 它烧了 token 却什么都没换回来。
+        llm = self._last_llm = build_llm()
+        graph = build_graph(llm, build_registry(), workspace)
         return await graph.ainvoke(
             initial_state(
                 f"bench-{case.id}", case.task, str(case.repo_dir), self.settings.max_retries

@@ -138,3 +138,21 @@ class UsageReport(BaseModel):
         if self.cost_usd is None or not self.usage.calls:
             return None
         return self.cost_usd / self.usage.calls
+
+
+def report_for(llm: object) -> UsageReport:
+    """从一个 LLM 客户端实例收割累计用量并折算成本。
+
+    客户端本身就是 per-run 的累加器（`build_llm()` 每次新建），所以「实例累计」
+    就是「这个 run 的总量」。
+
+    做成模块级函数而不是留在 `finish` 节点里，是因为**崩掉的 run 也得收割** ——
+    而崩掉的 run 恰恰是最想知道花了多少钱的那种：它烧了 token 却什么都没换回来。
+    只在 `finish` 收割的话，异常一冒出来这笔账就永远丢了。
+    """
+    from repopilot.config import get_settings
+
+    model = getattr(llm, "model", "unknown") or "unknown"
+    usage = getattr(llm, "usage", None) or Usage()
+    cost = estimate_cost(usage, model, get_settings().pricing_for(model))
+    return UsageReport(model=model, usage=usage, cost_usd=cost.total_usd)
