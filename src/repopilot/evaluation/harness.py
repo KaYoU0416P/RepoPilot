@@ -110,16 +110,27 @@ class BenchHarness:
         finally:
             self.workspaces.cleanup(workspace)
 
-    async def run_all(self, cases: list[BenchCase]) -> BenchReport:
-        """串行跑。
+    async def run_all(self, cases: list[BenchCase], *, repeat: int = 1) -> BenchReport:
+        """串行跑。`repeat > 1` 时每个 case 跑多轮，用来量随机性。
 
         为什么不并发：每个 case 都要起 pytest 子进程，并发跑会互相抢 CPU，
         `duration_ms` 就没法比了。评测要的是可比性，不是吞吐。
+
+        **按轮跑，不是按 case 连跑**：先把 18 个跑完再跑第二轮。两个理由 ——
+        每一轮是一个完整可比的单位（中途挂了也有完整的几轮），
+        而且把「时段」的影响摊平（服务端负载、DeepSeek 的峰谷时段都会漂）。
         """
         results = []
-        for index, case in enumerate(cases, start=1):
-            log.info("[%s/%s] %s — %s", index, len(cases), case.id, case.title)
-            results.append(await self.run_case(case))
+        for run_index in range(repeat):
+            for index, case in enumerate(cases, start=1):
+                if repeat > 1:
+                    log.info(
+                        "[第 %s/%s 轮][%s/%s] %s", run_index + 1, repeat, index, len(cases), case.id
+                    )
+                else:
+                    log.info("[%s/%s] %s — %s", index, len(cases), case.id, case.title)
+                result = await self.run_case(case)
+                results.append(result.model_copy(update={"run_index": run_index}))
         return aggregate(results)
 
     # ------------------------------------------------------------------ 三步

@@ -156,6 +156,8 @@ class CaseResult(BaseModel):
     detail: str = ""
     #: 这个 case 烧了多少 token / 多少钱。
     usage: UsageReport = Field(default_factory=UsageReport)
+    #: 第几轮（从 0 开始）。跑多轮时用来把同一个 case 的多次结果对起来。
+    run_index: int = 0
 
 
 def score(
@@ -216,6 +218,31 @@ class CategoryStats(BaseModel):
         return self.correct / self.total if self.total else 0.0
 
 
+class CaseStability(BaseModel):
+    """一个 case 在多轮里的表现。
+
+    **为什么需要它**：LLM 有随机性，跑一轮拿到的成功率是**一次采样**，不是水平。
+    实测过：同一个模型、同一批 case 连跑两轮，18 个里有 4 个落点变了，而且是双向的
+    （`fixed → false_success` 和 `false_success → fixed` 同时存在）。
+    单轮数字的误差比它本身的精度还大。
+    """
+
+    case_id: str
+    category: Category
+    correct_runs: int
+    total_runs: int
+    #: 每一轮的落点，按轮次顺序。报表要能直接把「它到底怎么飘的」打出来。
+    outcomes: list[str] = Field(default_factory=list)
+
+    @property
+    def verdict(self) -> Literal["stable_correct", "flaky", "stable_wrong"]:
+        if self.correct_runs == self.total_runs:
+            return "stable_correct"
+        if self.correct_runs == 0:
+            return "stable_wrong"
+        return "flaky"
+
+
 class BenchReport(BaseModel):
     """一次完整评测的报表。"""
 
@@ -252,11 +279,46 @@ class BenchReport(BaseModel):
     tool_selection: dict[str, int]
     total_duration_ms: int
 
+    # ---- 稳定性（跑多轮才有意义）----
+    #: 每个 case 跑了几轮。1 = 单轮，稳定性那一段没有意义，报表会跳过。
+    repeat: int = 1
+    stability: list[CaseStability] = Field(default_factory=list)
+    #: 每一轮各对了几个。用来看轮次之间的离散程度。
+    per_run_correct: list[int] = Field(default_factory=list)
+
     results: list[CaseResult]
 
     @property
     def success_rate(self) -> float:
+        """所有轮次拉平的平均成功率。跑多轮时分母是 case 数 × 轮数。"""
         return self.correct / self.total if self.total else 0.0
+
+    @property
+    def distinct_cases(self) -> int:
+        return len(self.stability)
+
+    @property
+    def reliable_rate(self) -> float:
+        """★**每一轮都对**才算对。这是能对外承诺的那个数。
+
+        接进真实流程时你关心的不是"平均而言能修对"，而是"这个 case 交给它，
+        它会不会稳定地修对"。一个 50% 概率修对的 case，在生产里等于不能用。
+        """
+        stable = sum(s.verdict == "stable_correct" for s in self.stability)
+        return stable / len(self.stability) if self.stability else 0.0
+
+    @property
+    def optimistic_rate(self) -> float:
+        """**至少有一轮对**就算对。这是最容易骗到自己的那个数。
+
+        它和 `reliable_rate` 的差 = 全部的随机性。只报这个数等于宣传运气。
+        """
+        any_ok = sum(s.correct_runs > 0 for s in self.stability)
+        return any_ok / len(self.stability) if self.stability else 0.0
+
+    @property
+    def flaky_cases(self) -> list[CaseStability]:
+        return [s for s in self.stability if s.verdict == "flaky"]
 
 
 def aggregate(results: list[CaseResult]) -> BenchReport:
@@ -305,8 +367,44 @@ def aggregate(results: list[CaseResult]) -> BenchReport:
         failure_reasons=failure_reasons,
         tool_selection=tool_selection,
         total_duration_ms=sum(r.duration_ms for r in results),
+        repeat=max((r.run_index for r in results), default=0) + 1,
+        stability=_stability(results),
+        per_run_correct=_per_run_correct(results),
         results=results,
     )
+
+
+def _stability(results: list[CaseResult]) -> list[CaseStability]:
+    """按 case 分组，看它在多轮之间飘不飘。
+
+    单轮跑的时候每个 case 只有一条记录，`verdict` 退化成「对/错」——
+    不是错的，只是没有信息量。报表那边靠 `repeat > 1` 决定要不要显示。
+    """
+    grouped: dict[str, list[CaseResult]] = {}
+    for r in results:
+        grouped.setdefault(r.case_id, []).append(r)
+
+    out = []
+    for case_id, runs in grouped.items():
+        ordered = sorted(runs, key=lambda r: r.run_index)
+        out.append(
+            CaseStability(
+                case_id=case_id,
+                category=ordered[0].category,
+                correct_runs=sum(r.correct for r in ordered),
+                total_runs=len(ordered),
+                outcomes=[r.outcome for r in ordered],
+            )
+        )
+    return sorted(out, key=lambda s: s.case_id)
+
+
+def _per_run_correct(results: list[CaseResult]) -> list[int]:
+    """每一轮各对了几个。轮次之间差多少，就是这个数字的误差棒。"""
+    by_run: dict[int, int] = {}
+    for r in results:
+        by_run[r.run_index] = by_run.get(r.run_index, 0) + int(r.correct)
+    return [by_run[i] for i in sorted(by_run)]
 
 
 def _failure_overhead(results: list[CaseResult]) -> float | None:
@@ -325,6 +423,56 @@ def _failure_overhead(results: list[CaseResult]) -> float | None:
     return (sum(bad) / len(bad) - ok_avg) / ok_avg
 
 
+#: 稳定性的三档，和它们在报表里的记号。
+_VERDICT_MARK = {"stable_correct": "✓", "flaky": "~", "stable_wrong": "✗"}
+
+
+def _stability_lines(report: BenchReport) -> list[str]:
+    """多轮模式的主表：每个 case 一行，把每一轮的落点并排打出来。
+
+    并排打而不是只报一个比例，是因为**怎么飘的比飘多少更有信息**：
+    `fixed / false_success / fixed` 和 `crashed / crashed / fixed` 都是 2/3，
+    但前者是模型不稳定，后者是预算不够 —— 该修的东西完全不同。
+    """
+    lines = [f"{'case':<28}{'轮次落点':<46}{'对/共':>7}", "-" * 78]
+    for s in sorted(report.stability, key=lambda x: (x.verdict != "flaky", x.case_id)):
+        trail = " ".join(o[:14] for o in s.outcomes)
+        mark = _VERDICT_MARK[s.verdict]
+        lines.append(f"{mark} {s.case_id:<26}{trail:<46}{s.correct_runs}/{s.total_runs:>3}")
+
+    stable = sum(s.verdict == "stable_correct" for s in report.stability)
+    wrong = sum(s.verdict == "stable_wrong" for s in report.stability)
+    flaky = len(report.flaky_cases)
+    n = report.distinct_cases
+
+    spread = ""
+    if report.per_run_correct:
+        # 用逗号不用斜杠：`0/0` 会被读成分数，而这里是「第一轮 0 个、第二轮 0 个」。
+        each = "、".join(str(c) for c in report.per_run_correct)
+        spread = f"   各轮对了 {each}（每轮共 {n} 个）"
+
+    lines += [
+        "",
+        f"稳定性（每个 case 跑 {report.repeat} 轮）",
+        "-" * 78,
+        f"  ✓ 稳定做对             {stable}/{n}",
+        f"  ~ 不稳定               {flaky}/{n}   ★有的轮次对、有的轮次错",
+        f"  ✗ 稳定做错             {wrong}/{n}",
+        "",
+        f"  平均成功率             {report.success_rate:.0%}{spread}",
+        f"  ★可靠成功率            {report.reliable_rate:.0%}   （每一轮都对才算，"
+        f"这是能对外承诺的数）",
+        f"  乐观成功率             {report.optimistic_rate:.0%}   （至少一轮对就算，"
+        f"最容易骗自己的数）",
+    ]
+    if flaky:
+        gap = report.optimistic_rate - report.reliable_rate
+        lines.append(
+            f"  ★两者之差 {gap:.0%} 全是随机性 —— 只报乐观值等于在宣传运气"
+        )
+    return lines
+
+
 def format_report(report: BenchReport) -> str:
     """给终端看的报表。刻意不用第三方表格库，几行 f-string 够了。"""
     lines = [
@@ -334,15 +482,17 @@ def format_report(report: BenchReport) -> str:
         f"({report.success_rate:.0%})   耗时 {report.total_duration_ms / 1000:.1f}s",
         "=" * 78,
         "",
-        f"{'case':<28}{'类别':<20}{'落点':<20}{'重试':>4}{'工具':>5}",
-        "-" * 78,
     ]
-    for r in report.results:
-        mark = "✓" if r.correct else "✗"
-        lines.append(
-            f"{mark} {r.case_id:<26}{r.category:<20}{r.outcome:<20}"
-            f"{r.retry_count:>4}{r.tool_calls_total:>5}"
-        )
+    if report.repeat > 1:
+        lines += _stability_lines(report)
+    else:
+        lines += [f"{'case':<28}{'类别':<20}{'落点':<20}{'重试':>4}{'工具':>5}", "-" * 78]
+        for r in report.results:
+            mark = "✓" if r.correct else "✗"
+            lines.append(
+                f"{mark} {r.case_id:<26}{r.category:<20}{r.outcome:<20}"
+                f"{r.retry_count:>4}{r.tool_calls_total:>5}"
+            )
 
     lines += ["", "按类别", "-" * 78]
     for name, stats in sorted(report.by_category.items()):

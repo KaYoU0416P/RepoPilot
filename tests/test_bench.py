@@ -599,6 +599,104 @@ async def test_harness_survives_an_agent_that_explodes(settings, tmp_path):
     assert result.correct is False
 
 
+# ============================================================== 多轮稳定性
+def _run(case_id: str, *, correct: bool, outcome: str, run_index: int) -> CaseResult:
+    return CaseResult(
+        case_id=case_id,
+        category="single_file",
+        expected="fixed",
+        outcome=outcome,
+        correct=correct,
+        hidden_tests_passed=correct,
+        agent_claimed_success=True,
+        run_index=run_index,
+    )
+
+
+def _three_runs(case_id: str, pattern: list[tuple[bool, str]]) -> list[CaseResult]:
+    return [
+        _run(case_id, correct=ok, outcome=outcome, run_index=i)
+        for i, (ok, outcome) in enumerate(pattern)
+    ]
+
+
+def test_a_case_correct_in_every_run_is_stable():
+    report = aggregate(_three_runs("a", [(True, "fixed")] * 3))
+    (s,) = report.stability
+    assert s.verdict == "stable_correct"
+    assert s.correct_runs == 3
+
+
+def test_a_case_wrong_in_every_run_is_stably_wrong():
+    report = aggregate(_three_runs("a", [(False, "not_fixed")] * 3))
+    (s,) = report.stability
+    assert s.verdict == "stable_wrong"
+
+
+def test_a_case_that_flips_between_runs_is_flaky():
+    """★这一跑存在的全部理由：同一个模型、同一个 case，落点会变。"""
+    report = aggregate(
+        _three_runs("a", [(True, "fixed"), (False, "false_success"), (True, "fixed")])
+    )
+    (s,) = report.stability
+    assert s.verdict == "flaky"
+    assert s.outcomes == ["fixed", "false_success", "fixed"]
+
+
+def test_reliable_rate_only_counts_cases_that_never_failed():
+    """★可靠成功率 vs 乐观成功率，两者之差就是随机性。
+
+    a 稳定对、b 飘、c 稳定错：
+      平均成功率 = 4/9 次
+      可靠成功率 = 1/3（只有 a）
+      乐观成功率 = 2/3（a 和 b）
+    只报乐观值等于在宣传运气。
+    """
+    results = (
+        _three_runs("a", [(True, "fixed")] * 3)
+        + _three_runs("b", [(True, "fixed"), (False, "not_fixed"), (False, "not_fixed")])
+        + _three_runs("c", [(False, "not_fixed")] * 3)
+    )
+    report = aggregate(results)
+
+    assert report.total == 9 and report.correct == 4
+    assert report.success_rate == pytest.approx(4 / 9)
+    assert report.reliable_rate == pytest.approx(1 / 3)
+    assert report.optimistic_rate == pytest.approx(2 / 3)
+    assert [s.case_id for s in report.flaky_cases] == ["b"]
+
+
+def test_per_run_correct_shows_the_spread_between_rounds():
+    results = (
+        _three_runs("a", [(True, "fixed")] * 3)
+        + _three_runs("b", [(True, "fixed"), (False, "not_fixed"), (True, "fixed")])
+    )
+    assert aggregate(results).per_run_correct == [2, 1, 2]
+
+
+def test_repeat_is_derived_from_the_results_not_passed_in():
+    """报表不该相信调用方说跑了几轮，数一下 run_index 就知道了。"""
+    assert aggregate(_three_runs("a", [(True, "fixed")] * 3)).repeat == 3
+    assert aggregate(_three_runs("a", [(True, "fixed")])).repeat == 1
+
+
+def test_single_run_reports_skip_the_stability_section():
+    """跑一轮时"稳定性"没有信息量，不该占版面误导人。"""
+    text = format_report(aggregate(_three_runs("a", [(True, "fixed")])))
+    assert "稳定性" not in text
+    assert "可靠成功率" not in text
+
+
+def test_multi_run_reports_show_how_a_case_flipped():
+    """怎么飘的比飘多少更有信息 —— 报表要把每一轮的落点并排打出来。"""
+    text = format_report(
+        aggregate(_three_runs("a", [(True, "fixed"), (False, "false_success"), (True, "fixed")]))
+    )
+    assert "稳定性" in text
+    assert "false_success" in text
+    assert "可靠成功率" in text
+
+
 #: 真实评测里 Agent 用来破解 `unsolvable-contradictory` 的那份实现。
 #: 靠 str 子类给返回值打类型标记，`isinstance` 认出来就"幂等"，
 #: 认不出来就追加后缀 —— 值相等、类型不等，两条互斥断言全过。

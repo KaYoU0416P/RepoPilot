@@ -3,6 +3,7 @@
     uv run python scripts/bench.py                    # 跑全部 18 个
     uv run python scripts/bench.py --only off-by-one  # 只跑指定的
     uv run python scripts/bench.py --json out.json    # 顺便存一份机读报表
+    uv run python scripts/bench.py --repeat 3         # 每个 case 跑 3 轮，量随机性
 
 选中的 provider 没有 key 时会降级到 ScriptedLLM，那时**分数没有意义** ——
 ScriptedLLM 只认识内置样例仓库，在这 18 个 case 上基本全错。
@@ -26,6 +27,12 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="RepoPilot 评测基准集")
     parser.add_argument("--only", help="逗号分隔的 case id，只跑这些")
     parser.add_argument("--json", type=Path, help="把报表另存为 JSON")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="每个 case 跑几轮。>1 时报表会给出稳定性：可靠成功率 vs 乐观成功率",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -55,7 +62,13 @@ async def main() -> int:
         print(f"没找到任何 case（root={CASES_ROOT}, only={only}）", file=sys.stderr)
         return 1
 
-    report = await BenchHarness(settings).run_all(cases)
+    if args.repeat > 1:
+        print(
+            f"▶  每个 case 跑 {args.repeat} 轮，共 {len(cases) * args.repeat} 次。\n"
+            f"   单轮成功率是一次采样，不是水平 —— 这一跑就是为了量它到底飘多少。\n",
+            file=sys.stderr,
+        )
+    report = await BenchHarness(settings).run_all(cases, repeat=args.repeat)
     print(format_report(report))
 
     if args.json:

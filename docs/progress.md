@@ -34,7 +34,7 @@
 
 ## NOW
 
-### Stage D 第四步 — DeepSeek provider（293 passed / 2 skipped，ruff 全绿）
+### Stage D 第四步 — DeepSeek provider（301 passed / 2 skipped，ruff 全绿）
 
 **动机是成本**：18 个 case 跑 Anthropic 要几美元，跑 DeepSeek 是几毛。
 但顺带拿到一个更值钱的东西 —— **同一套基准集横评两个模型**，
