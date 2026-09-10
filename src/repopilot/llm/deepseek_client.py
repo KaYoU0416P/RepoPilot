@@ -146,9 +146,21 @@ class DeepSeekLLM:
 
             arguments = _tool_arguments(body)
             if arguments is None:
+                reason = _finish_reason(body)
+                # `length` 值得单独说人话：它不是"模型不听话"，是**输出预算烧完了**。
+                # 思考模型的思考过程本身就吃 output token，回复被从中间截断，
+                # 于是既没有 tool_call 也没有能解析的正文。报错不指出这一点的话，
+                # 人会去调 prompt —— 而真正该调的是 max_tokens（或者加成本熔断）。
+                if reason == "length":
+                    raise LLMError(
+                        f"回复被 max_tokens={self._max_tokens} 截断（finish_reason=length），"
+                        f"本次已产出 {call.output_tokens} 个 output token。"
+                        f"思考模型的思考过程也吃 output 预算，"
+                        f"调大 REPOPILOT_MAX_TOKENS 或换非思考模型。"
+                    )
                 raise LLMError(
                     f"model returned neither a tool_call nor parseable JSON "
-                    f"(finish_reason={_finish_reason(body)})"
+                    f"(finish_reason={reason})"
                 )
             try:
                 return schema.model_validate(arguments)

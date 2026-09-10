@@ -190,6 +190,29 @@ def _prose(content: str) -> dict:
     return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
 
 
+async def test_being_cut_off_by_max_tokens_says_so_in_plain_words():
+    """★这个错真实咬过两次，报错必须指向 max_tokens 而不是让人去调 prompt。
+
+    `length` 不是"模型不听话"，是**输出预算烧完了** —— 思考模型的思考过程
+    本身就吃 output token，回复被从中间截断，于是既没有 tool_call
+    也没有能解析的正文。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"finish_reason": "length", "message": {"content": '{"passed": tr'}}],
+                "usage": {"prompt_tokens": 500, "completion_tokens": 16603},
+            },
+        )
+
+    with pytest.raises(LLMError) as exc:
+        await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
+    assert "max_tokens" in str(exc.value)
+    assert "16603" in str(exc.value)
+
+
 async def test_a_response_with_neither_tool_call_nor_json_is_an_llm_error():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_prose("我觉得这个任务不太清楚，能再说说吗？"))
