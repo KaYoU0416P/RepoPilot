@@ -50,7 +50,9 @@ class Nodes:
         listing = await self.registry.call("list_files", self.ws, glob="**/*.py")
         analysis = await self.llm.structured(
             system=prompts.SYSTEM,
-            user=prompts.ANALYZE_USER.format(task=state["task"], tree=listing.content),
+            user=prompts.ANALYZE_USER.format(
+                task=prompts.fence_task(state["task"]), tree=listing.content
+            ),
             schema=Analysis,
         )
         return {
@@ -84,7 +86,7 @@ class Nodes:
         plan = await self.llm.structured(
             system=prompts.SYSTEM,
             user=prompts.PLAN_USER.format(
-                task=state["task"],
+                task=prompts.fence_task(state["task"]),
                 reasoning=analysis.reasoning,
                 evidence=evidence or "(no evidence gathered)",
             ),
@@ -131,7 +133,7 @@ class Nodes:
             edit_set = await self.llm.structured(
                 system=prompts.SYSTEM,
                 user=prompts.EXECUTE_USER.format(
-                    task=state["task"],
+                    task=prompts.fence_task(state["task"]),
                     summary=plan.summary,
                     approach=plan.approach,
                     files=current or "(no files read)",

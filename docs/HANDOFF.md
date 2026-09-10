@@ -26,7 +26,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 **定位**：把 Coding Agent 接进真实研发流程的后端服务。不是「能改代码的脚本」，
 是「Issue → Run → 审批 → PR」这条业务链路。
 
-**当前状态：196 passed / 2 skipped，ruff 全绿，9 个 commit，master 干净。**
+**当前状态：225 passed / 2 skipped，ruff 全绿，master 干净。**
 
 先读这三份，不要凭猜：
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
@@ -44,7 +44,8 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 - **GitHub 全链路**：webhook HMAC-SHA256 验签（常数时间比较、fail closed）→
   幂等去重 → 入队；批准后 push 确定性分支 → 开 PR → 回写 Issue 评论。
   **发布幂等靠确定性分支名 + commit 时间戳钉死**
-- **评测基准集**：`benchmarks/cases/` 15 个 seeded bug（含 2 个故意无解），
+- **评测基准集**：`benchmarks/cases/` 18 个 case（15 seeded bug，含 2 个故意无解；
+  外加 3 个 prompt 注入攻击样本），
   隐藏测试判分、`false_success` 单独统计、评测集自检
 - **MCP server**：手写 JSON-RPC 2.0（不引 SDK），stdio 暴露 6 个工具
 
@@ -172,7 +173,7 @@ pytest 有 `pythonpath=["src"]` 兜底，但 **uvicorn 和 scripts/ 下的脚本
 
 ```
 make sync / db-up / db-reset / psql
-make test (196 passed / 2 skipped) / test-fast / test-nodb
+make test (225 passed / 2 skipped) / test-fast / test-nodb
 make demo / run(:8000, /docs)
 make bench (需 ANTHROPIC_API_KEY) / bench-check (不花钱)
 make mcp / mcp-smoke
