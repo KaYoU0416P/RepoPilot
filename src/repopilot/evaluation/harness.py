@@ -179,6 +179,11 @@ class BenchHarness:
             cwd=workspace.root,
             timeout=self.settings.test_timeout_seconds,
             env={"PYTHONDONTWRITEBYTECODE": "1"},
+            # ★这里跑的是**Agent 改过的** workspace：隐藏测试一 import 就会执行
+            # 它写的代码（甚至只要目录里有个 conftest.py 就够了）。
+            # 判分环节和 `run_tests` 一样是在跑不可信代码，不能因为"这些测试是
+            # 我们写的"就当它安全 —— **危险的是被测的那一侧，不是测试本身。**
+            untrusted=True,
         )
         return result.exit_code == 0 and not result.timed_out
 

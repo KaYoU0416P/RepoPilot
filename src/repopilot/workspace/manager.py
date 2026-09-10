@@ -16,6 +16,10 @@ log = get_logger(__name__)
 
 _IGNORED = {".git", "__pycache__", ".venv", ".pytest_cache", "node_modules", ".ruff_cache"}
 
+#: Agent 一律不许碰的目录。`.git` 是 git 的**控制面**（config / hooks 都能
+#: 让 git 在宿主机上执行命令），不是源码。见 `Workspace.resolve`。
+_FORBIDDEN_PARTS = {".git"}
+
 
 class PathEscapeError(ValueError):
     """Raised when a tool argument tries to reach outside the workspace."""
@@ -29,12 +33,24 @@ class Workspace:
     def resolve(self, relative_path: str) -> Path:
         """Map an agent-supplied path to a real path, or refuse.
 
-        Blocks absolute paths, `..` traversal and symlinks that point outside root.
+        Blocks absolute paths, `..` traversal, symlinks that point outside root,
+        **and anything under `.git/`**。
+
+        ★最后那条不是洁癖，是堵一条**宿主机代码执行**：`.git/` 在 workspace
+        *里面*，光靠"不许逃出 workspace"拦不住。而 `git_diff` 工具是在**宿主机**
+        上跑 `git add` 的 —— 只要往 `.git/config` 写一行
+
+            [core] fsmonitor = /bin/sh -c '...'
+
+        git 刷新索引时就会替 Agent 执行它。`.git/hooks/` 同理。
+        **仓库元数据是 git 的控制面，不是源码**，Agent 没有任何正当理由去碰它。
         """
         candidate = (self.root / relative_path).resolve()
         root = self.root.resolve()
         if candidate != root and root not in candidate.parents:
             raise PathEscapeError(f"path escapes workspace: {relative_path!r}")
+        if any(part in _FORBIDDEN_PARTS for part in candidate.relative_to(root).parts):
+            raise PathEscapeError(f"refusing to touch repository metadata: {relative_path!r}")
         return candidate
 
     def relative(self, path: Path) -> str:

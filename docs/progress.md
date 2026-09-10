@@ -34,6 +34,51 @@
 
 ## NOW
 
+### Stage D 第九步 — 容器沙箱（把「隔离」从应用层换成内核级）
+
+`sandbox/local.py` 的隔离是路径收敛 + 超时 + 杀进程组 —— **应用层**的，
+靠我们自己不写出破绽。但 `run_tests` 跑的是**模型生成的代码**，
+`import socket` 一行就绕过去了。
+
+**实测对照**（`make sandbox-check` vs `ARGS=--local`，同一份探针）：
+
+| 探针 | 本地子进程 | 容器 |
+|---|---|---|
+| 联网 | ⚠️ **成功** | ✅ 拦住 |
+| `/Users`、`~/.ssh` | ⚠️ **看得见** | ✅ 看不见 |
+| **`.env`（里面是 API key）** | ⚠️ **看得见** | ✅ 看不见 |
+
+**不是理论风险**：本地子进程里模型代码既能读到 key，又有网络发出去。
+
+- **谁进容器**：`run_command(..., untrusted=True)`，全项目只有两处传 True。
+  `git clone/push` **不进** —— 它要网络和凭证，容器是断网的。
+  **参数名就是安全模型本身。**
+- **安全 flag 逐条单测**：`build_docker_command` 是纯函数。这些 flag
+  **少写一条不会报错，只会静悄悄地不设防**，所以必须逐条钉，
+  不能"跑一次看着像是对的"。
+- 三个必然踩的坑：**宿主机路径在容器里不存在**（`sys.executable` / workspace
+  都要翻译，bind mount ≠ 同一个文件系统）；**杀 `docker run` 客户端容器还活着**
+  （必须起名字再 `docker kill`，否则超时失效还漏一个烧 CPU 的容器）；
+  **容器里默认 root**，bind mount 上新建的文件宿主机删不掉（`--user` 修）。
+- 镜像必须**预装运行时**：容器断网，里面装不了任何东西。
+  「装依赖」和「跑不可信代码」必须是两个阶段。
+
+**★做这个时顺带查出两个真洞**（都已修 + 回归测试）：
+
+1. **评测的判分环节没进沙箱。** `_run_hidden_tests` 跑的是 **Agent 改过的**
+   workspace，隐藏测试一 import 就执行它写的代码（放个 `conftest.py` 就够）。
+   **危险的是被测的那一侧，不是测试本身** —— 不能因为"这些测试是我们写的"
+   就当它安全。
+2. ★**`.git/` 能被写，而 `git_diff` 在宿主机上跑 git。** 路径收敛只保证
+   「不逃出 workspace」，可 `.git/` 就**在** workspace 里面。往 `.git/config`
+   写一行 `[core] fsmonitor = /bin/sh -c '...'`，git 刷新索引时就替 Agent
+   在**宿主机**上执行了 —— 一条完整的宿主机代码执行路径。
+   `resolve()` 现在直接拒绝 `.git/` 下的任何路径。
+
+端到端：`REPOPILOT_SANDBOX=docker make bench --only off-by-one` → 1/1 修对，
+起了 5 个容器（基线自检 + Agent 跑测 ×3 + 判分），正常流程没被破坏。
+
+
 ### Stage D 第八步 — 成本熔断（记账之外的那半个刹车）
 
 `max_retries` 是**次数**预算，拦不住「在次数以内烧掉任意多 token」。
@@ -475,7 +520,11 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
   真要拆得换 Redis pub/sub 或 PG 的 `LISTEN/NOTIFY`。业务正确性不受影响 ——
   真相在数据库里，轮询 `GET /runs/{id}` 结果一样。
 - 队列空转靠轮询（默认 1s），不是零延迟。`LISTEN/NOTIFY` 可以解决。
-- sandbox 是本地子进程，不是容器。隔离靠路径收敛 + 超时，不是内核级。
+- ~~sandbox 是本地子进程~~ → **容器沙箱已做**（`sandbox/docker.py`，见 NOW 第九步）。
+  但**默认仍是 `local`** —— Docker 不一定装了，`make test` 必须能在任何机器上跑。
+  ⚠️ **一旦开始 clone 陌生仓库就必须切到 `docker`**。剩下的边界：镜像里只预装了
+  pytest，接任意仓库还需要一个「按 requirements 联网装依赖」的构建阶段，
+  而那一步本身也在跑别人的代码（setup.py / build hook），需要单独隔离。
 - API 没有鉴权。
 - 发布链路**只在本地裸仓库上验证过**（测试用裸仓库当远端，git 那半边是真的，
   GitHub API 那半边是 `httpx.MockTransport`）。没打过真实 GitHub 的 API。

@@ -101,8 +101,18 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | 风险 | 措施 | 代码位置 |
 |---|---|---|
 | 模型写到仓库外 | `Workspace.resolve()` 拒绝绝对路径、`..`、符号链接逃逸 | `workspace/manager.py` |
+| 模型写进 `.git/` | 同上；`.git` 是 git 的**控制面**（`core.fsmonitor` 能在宿主机执行命令） | `workspace/manager.py` |
 | 生成的代码不终止 | 墙钟超时 + `os.killpg` 杀整个进程组 | `sandbox/local.py` |
 | 改坏真实仓库 | 全程操作 `copytree` 副本 | `workspace/manager.py` |
+| **模型代码联网 / 读宿主机文件** | **一次性容器：`--network none`、`--cap-drop ALL`、内存/PID 上限、只读根、非 root** | `sandbox/docker.py` |
+
+**应用层隔离 vs 内核级隔离**：前四条靠的是我们自己不写出破绽，
+`import socket` 一行就绕过去了。容器那条是内核给的。实测对照
+（`make sandbox-check ARGS=--local`）：本地子进程里探针**联网成功、
+能读 `.env` 里的 API key**。
+
+`untrusted=True` 是进容器的开关，全项目只有两处：`run_tests` 和评测判分
+（跑的都是 Agent 改过的代码）。`git clone/push` 不进 —— 它要网络和凭证。
 
 **刻意没有通用 shell 工具**。唯一的执行类工具是 `run_tests`，命令行是写死的。
 有了 shell，上面所有限制都变成装饰品。
@@ -300,7 +310,7 @@ publish                   publishing/github.py   另一条 trace，靠 run_id �
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
 MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪、DeepSeek provider。**335 passed / 4 skipped。**
+OpenTelemetry 链路追踪、DeepSeek provider。**358 passed / 4 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
 **未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、

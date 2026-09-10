@@ -28,6 +28,9 @@ async def run_tests(workspace: Workspace, target: str = "") -> ToolResult:
         cwd=workspace.root,
         timeout=settings.test_timeout_seconds,
         env={"PYTHONDONTWRITEBYTECODE": "1"},
+        # ★全项目唯一一处 `untrusted=True`：这行跑的是**模型写出来的代码**。
+        # 配了 `sandbox=docker` 时它会进一次性容器（断网 + 掉权限 + 资源上限）。
+        untrusted=True,
     )
     output = f"{result.stdout}\n{result.stderr}".strip()
 

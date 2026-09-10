@@ -35,7 +35,7 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 335 passed / 4 skipped
+make test          # 358 passed / 4 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
@@ -74,12 +74,67 @@ curl -s -X POST localhost:8000/runs/$RID/approval \
 | 风险 | 措施 |
 |---|---|
 | 模型写到仓库外 | `Workspace.resolve()` 拒绝绝对路径、`..`、符号链接逃逸 |
+| **模型写进 `.git/`** | **同上，`.git` 是 git 的控制面不是源码——见下** |
 | 生成的代码不终止 | 墙钟超时 + `os.killpg` 杀整个进程组 |
 | 改坏真实仓库 | 全程操作 `copytree` 出来的副本 |
+| **模型代码联网 / 读宿主机文件** | **容器沙箱（`--network none` + 掉权限 + 资源上限）** |
 | Agent 自称成功 | 用测试结果判定，且状态机不允许 `running` 直达 `published` |
 
 **刻意没有通用 shell 工具**。唯一的执行类工具是 `run_tests`，命令行写死。
 有了 shell，上面所有限制都变成装饰品。
+
+### 容器沙箱：路径收敛不是隔离
+
+```bash
+make sandbox-image                    # 构建预装运行时的镜像
+make sandbox-check                    # 把攻击探针丢进沙箱，看每道墙在不在
+make sandbox-check ARGS=--local       # 对照组
+REPOPILOT_SANDBOX=docker make bench    # 开着容器跑评测
+```
+
+同一份探针，两种沙箱，**实测**：
+
+| 探针 | 本地子进程 | 容器 |
+|---|---|---|
+| 联网 | ⚠️ **成功** | ✅ 拦住 |
+| 看 `/Users` | ⚠️ **看得见** | ✅ 看不见 |
+| 看 `~/.ssh` | ⚠️ **看得见** | ✅ 看不见 |
+| **看 `.env`（里面是 API key）** | ⚠️ **看得见** | ✅ 看不见 |
+| 读 `/etc/shadow` | 拦住 | 拦住 |
+| 写根目录 | 拦住 | 拦住 |
+
+**这不是理论风险**：本地子进程里，模型生成的测试代码既能读到 `.env` 里的
+API key，又有网络把它发出去。`sandbox/local.py` 的隔离是**应用层**的
+（路径收敛 + 超时），靠的是我们自己不写出破绽；容器那层是内核给的。
+
+**谁进容器**：`run_command(..., untrusted=True)`，全项目只有两处传 True ——
+`run_tests`（跑模型写的代码）和评测的判分环节（跑的是 Agent 改过的 workspace，
+一 import 就执行）。`git clone/push` **不进** ——它需要网络和凭证，
+而容器是断网的。**参数名就是安全模型本身**：看到 `untrusted=True` 就知道这行危险。
+
+三个必然会踩的坑：
+
+- **宿主机路径在容器里不存在。** `sys.executable` 是 `/Users/…/.venv/bin/python3`，
+  容器里没这个文件；workspace 也从 `/Users/…` 变成 `/work`。**bind mount
+  不等于同一个文件系统**，命令要翻译。
+- **杀掉 `docker run` 客户端，容器还在跑。** 它只是个客户端，超时就此失效，
+  还漏一个在烧 CPU 的容器。必须给容器起名字再 `docker kill`。
+- **容器里默认是 root**，它在 bind mount 上建的文件在宿主机上属主是 root，
+  然后宿主机清理 workspace 会失败。所以 `--user $(id -u):$(id -g)`。
+
+### `.git/` 是控制面，不是源码
+
+路径收敛只保证「不逃出 workspace」，而 `.git/` 就**在** workspace 里面。
+往 `.git/config` 写一行：
+
+```ini
+[core]
+    fsmonitor = /bin/sh -c '...'
+```
+
+`git_diff` 工具是在**宿主机**上跑 `git add` 的，git 刷新索引时就会执行它——
+一条完整的宿主机代码执行路径。所以 `resolve()` 直接拒绝 `.git/` 下的任何路径。
+**这是做容器沙箱时顺带查出来的，有回归测试钉着。**
 
 ### 不信任进程活着
 
@@ -518,7 +573,7 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
 18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**335 passed / 4 skipped，ruff 全绿。**
+OpenTelemetry 链路追踪。**358 passed / 4 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 

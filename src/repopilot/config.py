@@ -121,6 +121,18 @@ class Settings(BaseSettings):
 
     max_files_per_edit: int = 5
 
+    # --- 沙箱 ---
+    #: 跑**不可信代码**用哪种隔离。`local` = 子进程（路径收敛 + 超时 + 杀进程组，
+    #: 应用层）；`docker` = 一次性容器（断网 + 内存/PID 上限 + 掉权限，内核级）。
+    #:
+    #: 默认还是 `local`：Docker 不一定装了，而 `make test` 必须能在任何机器上跑。
+    #: ⚠️ **一旦开始 clone 陌生仓库，就必须切到 `docker`** —— 那时跑的是别人的
+    #: 测试代码，应用层约束一条都拦不住 `import socket`。
+    sandbox: Literal["local", "docker"] = "local"
+    #: 容器镜像。**必须预装目标仓库要的运行时** —— 容器是断网起的，
+    #: 里面装不了任何东西。见 `docker/sandbox.Dockerfile`，`make sandbox-image` 构建。
+    sandbox_image: str = "repopilot-sandbox:py312"
+
     # --- Safety limits ---
     tool_timeout_seconds: float = 20.0
     test_timeout_seconds: float = 60.0

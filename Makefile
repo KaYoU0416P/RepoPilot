@@ -1,4 +1,4 @@
-.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace clean
+.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace sandbox-image sandbox-check clean
 
 # uv 在这台机器上写出来的 .pth 带 macOS UF_HIDDEN 标志，而 CPython 的 site.py
 # 会静默跳过隐藏的 .pth -> import repopilot 失败。详见 docs/failures.md。
@@ -83,6 +83,18 @@ mcp-smoke: sync
 	| python3 -c 'import sys,json; ls=[l for l in sys.stdin.read().strip().split("\n") if l]; \
 	  assert len(ls)==2, "通知不该回包"; [json.loads(l) for l in ls]; \
 	  print("MCP stdio 握手正常：%d 行响应，stdout 未被日志污染" % len(ls))'
+
+# ------------------------------------------------------------------ 沙箱
+# 跑不可信代码的容器镜像。**必须预装运行时** —— 容器是 --network none 起的，
+# 里面装不了任何东西。构建时联网备好，运行时断网执行。
+sandbox-image:
+	docker build -f docker/sandbox.Dockerfile -t repopilot-sandbox:py312 .
+
+# 隔离自检：把一份"攻击性"探针丢进沙箱，看每道墙是不是真的在。
+# 加 ARGS=--local 跑对照组 —— 那一组会看到联网成功、.env 可读，
+# 正是"本地子进程不是隔离"的直接证据。
+sandbox-check: sync
+	uv run --no-sync python scripts/sandbox_check.py $(ARGS)
 
 clean:
 	rm -rf .workspaces .pytest_cache .ruff_cache
