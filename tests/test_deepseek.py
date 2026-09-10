@@ -12,7 +12,7 @@ import pytest
 from repopilot.agent.schemas import TestOutcome
 from repopilot.config import DEFAULT_MODELS, Settings, get_settings
 from repopilot.llm.base import LLMError
-from repopilot.llm.deepseek_client import DeepSeekLLM, _usage_of
+from repopilot.llm.deepseek_client import DeepSeekLLM, _usage_of, strictify
 
 
 def _body(arguments: dict, usage: dict | None = None, finish: str = "tool_calls") -> dict:
@@ -49,8 +49,11 @@ def _llm(handler, **kwargs) -> DeepSeekLLM:
 
 
 # ------------------------------------------------------------ 请求长什么样
-async def test_the_request_forces_the_model_to_call_our_one_tool():
-    """结构化输出的地基：不是"请你返回 JSON"，是**强制调用**一个入参就是 schema 的工具。"""
+async def test_exactly_one_tool_is_offered_and_it_is_our_schema():
+    """强制不了工具（思考模式限制），所以"只挂一把锤子"就是让模型用它的最强手段。
+
+    挂两个工具会立刻多出一个「选错」的失败模式，而我们没有 tool_choice 兜底。
+    """
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -59,13 +62,42 @@ async def test_the_request_forces_the_model_to_call_our_one_tool():
 
     await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
 
-    assert seen["tool_choice"] == {"type": "function", "function": {"name": "test_outcome"}}
     (tool,) = seen["tools"]
     assert tool["type"] == "function"
     assert tool["function"]["name"] == "test_outcome"
     # ★没有 strict，arguments 只是"尽量"符合 schema，服务端校验就丢了
     assert tool["function"]["strict"] is True
-    assert tool["function"]["parameters"] == TestOutcome.model_json_schema()
+    # 送的是**改造过**的 schema，不是 pydantic 原样吐出来的那份（见 strictify）
+    assert tool["function"]["parameters"] == strictify(TestOutcome.model_json_schema())
+
+
+async def test_tool_choice_defaults_to_auto_because_forcing_is_a_400():
+    """★实测出来的约束，不是查文档猜的。
+
+    DeepSeek V4 常驻思考模式，`{"type":"function",...}` 和 `"required"` 都会
+    换回 400「Thinking mode does not support this tool_choice」。只有 auto 能用。
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json=_body({"passed": True, "output": "ok"}))
+
+    await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
+    assert seen["tool_choice"] == "auto"
+
+
+async def test_tool_choice_stays_configurable_for_other_compatible_endpoints():
+    """别的 OpenAI 兼容端点未必有这个限制 —— 指向非思考模型时要能把强制拿回来。"""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json=_body({"passed": True, "output": "ok"}))
+
+    llm = _llm(handler, tool_choice="required")
+    await llm.structured(system="s", user="u", schema=TestOutcome)
+    assert seen["tool_choice"] == "required"
 
 
 async def test_system_and_user_become_two_messages_not_a_system_field():
@@ -96,6 +128,50 @@ async def test_default_base_url_is_the_beta_channel():
     assert seen["url"] == "https://api.deepseek.com/beta/chat/completions"
 
 
+# ------------------------------------------------------- strict schema 改造
+def test_every_property_becomes_required():
+    """★这条钉的是冒烟测试真撞到的 400。
+
+    pydantic 只把「没有默认值」的字段列进 `required`，而 strict 模式要求
+    列出**全部**属性，否则直接 400：
+    「Required properties must match all properties in the object」。
+    """
+    from repopilot.agent.schemas import Analysis
+
+    strict = strictify(Analysis.model_json_schema())
+    assert set(strict["required"]) == set(strict["properties"])
+    # 原样的 schema 里 relevant_files 有 default_factory，所以不在 required
+    assert "relevant_files" not in Analysis.model_json_schema()["required"]
+
+
+def test_nested_definitions_are_strictified_too():
+    """`EditSet.$defs.FileEdit` 是嵌套 object，只改顶层照样被拒。"""
+    from repopilot.agent.schemas import EditSet
+
+    strict = strictify(EditSet.model_json_schema())
+    nested = strict["$defs"]["FileEdit"]
+    assert set(nested["required"]) == {"path", "content", "rationale"}
+    assert nested["additionalProperties"] is False
+
+
+def test_additional_properties_is_closed_everywhere():
+    from repopilot.agent.schemas import EditSet
+
+    strict = strictify(EditSet.model_json_schema())
+    assert strict["additionalProperties"] is False
+    assert strict["$defs"]["FileEdit"]["additionalProperties"] is False
+
+
+def test_strictify_does_not_mutate_its_input():
+    """schema 在别处还要用（比如 Anthropic 那条路），不能就地改。"""
+    from repopilot.agent.schemas import Analysis
+
+    original = Analysis.model_json_schema()
+    before = json.dumps(original, sort_keys=True)
+    strictify(original)
+    assert json.dumps(original, sort_keys=True) == before
+
+
 # --------------------------------------------------------------- 解析响应
 async def test_arguments_is_a_json_string_and_gets_parsed():
     """★和 Anthropic 的真实差异：那边 `block.input` 直接是 dict，这边是字符串。"""
@@ -109,11 +185,52 @@ async def test_arguments_is_a_json_string_and_gets_parsed():
     assert result.output == "boom"
 
 
-async def test_a_response_with_no_tool_call_is_an_llm_error():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {}}]})
+def _prose(content: str) -> dict:
+    """模型没调工具，改口说人话了。"""
+    return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
 
-    with pytest.raises(LLMError, match="no tool_call"):
+
+async def test_a_response_with_neither_tool_call_nor_json_is_an_llm_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_prose("我觉得这个任务不太清楚，能再说说吗？"))
+
+    with pytest.raises(LLMError, match="neither a tool_call nor parseable JSON"):
+        await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"passed": true, "output": "ok"}',
+        '```json\n{"passed": true, "output": "ok"}\n```',
+        '好的，结果如下：\n{"passed": true, "output": "ok"}\n希望有帮助。',
+    ],
+)
+async def test_json_in_the_prose_is_recovered_when_the_model_skips_the_tool(content):
+    """★兜底路径。强制不了工具，模型有权改口说人话。
+
+    真发生时它通常还是吐一份 JSON，只是没包在 tool_call 里。与其让整个 run
+    死在 analyze 节点上，不如捞回来 —— pydantic 那一关照样要过，
+    捞错了会在下一步被挡住，不会放行脏数据。
+
+    这层兜底存在本身，就是「这条路的结构化输出只是极可能，不是协议保证」的证据。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_prose(content))
+
+    result = await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
+    assert result.passed is True
+    assert result.output == "ok"
+
+
+async def test_recovered_json_still_has_to_pass_schema_validation():
+    """兜底不等于放行 —— 捞上来的东西照样过 pydantic。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_prose('{"nonsense": 1}'))
+
+    with pytest.raises(LLMError, match="validation failed"):
         await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
 
 

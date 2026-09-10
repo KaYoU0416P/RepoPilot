@@ -34,7 +34,7 @@
 
 ## NOW
 
-### Stage D 第四步 — DeepSeek provider（278 passed / 2 skipped，ruff 全绿）
+### Stage D 第四步 — DeepSeek provider（288 passed / 2 skipped，ruff 全绿）
 
 **动机是成本**：18 个 case 跑 Anthropic 要几美元，跑 DeepSeek 是几毛。
 但顺带拿到一个更值钱的东西 —— **同一套基准集横评两个模型**，
@@ -62,7 +62,35 @@
   用 pydantic 的 `model_fields_set` 区分「用户就是要这个」和「用户压根没管」——
   否则「换了 provider 忘了换 model」会把 `claude-sonnet-4-6` 发给 DeepSeek。
 - 测试切在 `httpx.MockTransport` 上（和 `test_publishing.py` 一致）：
-  HTTP 那层是假的，**解析 / 映射 / 计量全是真的跑了一遍**。21 条，不联网不花钱。
+  HTTP 那层是假的，**解析 / 映射 / 计量全是真的跑了一遍**。31 条，不联网不花钱。
+
+**冒烟测试当场撞出两个真 bug，都是查文档查不出来的**（这就是先跑单 case
+再跑全量的价值 —— 两分钱换回来的）：
+
+1. **`strict` 模式对 schema 另有要求**，送 pydantic 原样的 schema 直接 400：
+   「Required properties must match all properties in the object」。
+   strict 要求 `required` 列出**全部**属性 + 每个 object 都 `additionalProperties: false`，
+   而 pydantic 只把「没有默认值」的字段列进 `required`。加了 `strictify()`
+   递归改造（`$defs` 里的嵌套 object 也得改，只改顶层照样被拒）。
+   **语义损失要主动讲**：strict 下 `required` 从「业务上必填」变成
+   「模型必须输出这个键」，pydantic 的 `default` 就永远用不上了 ——
+   **用表达力换确定性**。
+2. ★**工具「强制」不了**：DeepSeek V4 两个模型都**常驻思考模式**，
+   而思考模式拒绝任何形式的强制。花两分钱实测了四种写法：
+
+       tool_choice={"type":"function",...}  → 400 Thinking mode does not support…
+       tool_choice="required"               → 400（同上）
+       tool_choice="auto"                   → 200，且确实调了工具、schema 校验通过
+       （不传）                              → 200，同上（还看到 hit=384，自动缓存生效）
+
+   上游已知限制，有公开 issue，各家框架都得给 V4 关掉 `supportsToolChoice`。
+   于是这条路只能 `auto` + **一个**工具 + SYSTEM 明说用工具。
+   **差别必须讲清楚：Anthropic 那条路「必须返回结构化输出」是协议保证的，
+   这条路只是「极可能」。** 加了正文捞 JSON 的兜底 ——
+   捞上来照样过 pydantic，不会放行脏数据。**这层兜底存在本身就是那个差别的证据。**
+
+**首次真实 LLM 冒烟通过**：`off-by-one` 1/1 修对，**$0.0030**，3 次 LLM 调用、
+3,392 token、10 次工具调用、0 重试。
 - ★**顺手修了一个一直存在的静默 bug**：`env_prefix="REPOPILOT_"` 只作用于
   **字段名推导出来的**变量名，所以 `.env` 里写裸的 `ANTHROPIC_API_KEY=...`
   **一直是被静默忽略的** —— 不报错、不警告，只是降级成 scripted。
