@@ -1,10 +1,19 @@
 from repopilot.config import get_settings
 from repopilot.llm.base import LLMClient, LLMError
+from repopilot.llm.budget import BudgetedLLM, BudgetExceeded, budget_from_settings
 from repopilot.llm.scripted import ScriptedLLM
 
 
 def build_llm() -> LLMClient:
-    """Provider selection lives here so nodes only ever see the LLMClient protocol."""
+    """Provider selection lives here so nodes only ever see the LLMClient protocol.
+
+    最后统一套一层 `BudgetedLLM` —— **熔断只写一遍，所有 provider 都有**。
+    这是单方法协议的第四次兑现（前三次：加计量、加 span、换供应商）。
+    """
+    return BudgetedLLM(_provider(), budget_from_settings())
+
+
+def _provider() -> LLMClient:
     settings = get_settings()
     if settings.llm_provider == "anthropic":
         from repopilot.llm.anthropic_client import AnthropicLLM
@@ -26,4 +35,4 @@ def build_llm() -> LLMClient:
     return ScriptedLLM()
 
 
-__all__ = ["LLMClient", "LLMError", "ScriptedLLM", "build_llm"]
+__all__ = ["BudgetExceeded", "LLMClient", "LLMError", "ScriptedLLM", "build_llm"]

@@ -35,7 +35,7 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 319 passed / 4 skipped
+make test          # 335 passed / 4 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
@@ -155,6 +155,37 @@ push 重复是 no-op，开 PR 前先查同 head 的 PR——崩在任何一步�
 
 **「失败更贵」这条以前是直觉，现在是数据**：失败的 run 平均比成功的**多烧一倍**
 token —— 它们把重试预算耗光了，却什么都没换回来。
+
+### 成本熔断：记账之外还要有刹车
+
+`max_retries` 是**次数**预算，拦不住「在次数以内烧掉任意多 token」。
+实测撞到过三次：**无解的题上模型反复推理，一次调用烧光 16,384 个输出 token，
+产出为零**。所以补了 `llm/budget.py`：
+
+| | 作用 | 为什么 |
+|---|---|---|
+| `max_run_tokens` | **主控** | token 永远算得出来，不依赖定价表 |
+| `max_run_cost_usd` | 补充 | 定价表查不到的模型成本是 `None`，**没法比大小** |
+
+★**主控是 token 不是美元**，因为美元有一个致命空档：查不到定价的模型成本是
+`None`（这是「未知≠0」那条原则的下游后果），于是美元熔断**恰好在最需要它的
+时候失效**——你用了个没登记的新模型。token 那条永远有效。
+
+**默认阈值是从实测分布推出来的**：54 次真实 run 中位 4,258 token、p90 9,009、
+最大 39,062 → 默认 120K ≈ 最大值 3 倍。正常 run 一次都碰不到，跑飞了能兜住。
+**一个会绊倒正常流量的"安全网"，最后一定会被关掉。**
+
+实现是**装饰器**：`BudgetedLLM` 包住任意 `LLMClient`，自己也满足这个协议，
+所以熔断只写一遍、所有 provider 自动都有——这是单方法协议的**第四次兑现**
+（前三次：加计量、加 span、换供应商）。
+
+两个必须讲清楚的语义：
+
+- **实际花费一定会超出预算，最多超一次调用的量。** 没法预知下一次要花多少，
+  判据只能是「已经烧了多少」。熔断器保证的是「不会一直烧下去」，不是「一分不超」。
+- **预算是 per-attempt 不是 per-task。** 计数器活在客户端实例上，租约回收后
+  重新领取会从零开始。最坏花费是 `max_attempts × max_run_tokens` ——
+  和两层限流一样，**配额要按乘积算**。
 
 **prompt caching 算完决定不开。** 缓存是前缀匹配，渲染顺序是
 `tools → system → messages`，而三个节点的 `tools`（JSON Schema）各不相同 →
@@ -487,7 +518,7 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
 18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**319 passed / 4 skipped，ruff 全绿。**
+OpenTelemetry 链路追踪。**335 passed / 4 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 

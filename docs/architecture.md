@@ -132,8 +132,16 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | 工具超时 | `asyncio.wait_for` | 20s |
 | 测试超时 | `sandbox.run_command` | 60s |
 | 租约 | `lease_seconds` | 120s |
+| **一个 run 的 token** | **`BudgetedLLM` 熔断** | **120K** |
+| 一个 run 的美元 | 同上（补充） | $1.00 |
 
-**注意后两个是乘的关系**：最坏情况同时有 `2 × 4 = 8` 个工具在跑。
+**两处乘法要一起算**：
+- 并发 `2 × 4 = 8` 个工具可能同时在跑；
+- 花费 `max_attempts × max_run_tokens` —— 预算是 **per-attempt** 的，
+  租约回收后重新领取会从零开始。
+
+熔断主控是 **token 不是美元**：定价表查不到的模型成本是 `None`，没法比大小，
+美元那条恰好在最需要时失效。token 永远算得出来。
 
 ## LLM 供应商
 
@@ -292,7 +300,7 @@ publish                   publishing/github.py   另一条 trace，靠 run_id �
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
 MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪、DeepSeek provider。**319 passed / 4 skipped。**
+OpenTelemetry 链路追踪、DeepSeek provider。**335 passed / 4 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
 **未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、

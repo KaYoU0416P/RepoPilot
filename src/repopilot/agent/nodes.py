@@ -191,6 +191,21 @@ class Nodes:
         if test is not None and test.passed and state.get("files_changed"):
             return {"verdict": "success", "step_log": ["evaluate: success"]}
 
+        # ★重试之前先问一句「钱还够吗」。
+        #
+        # 熔断本身在 `BudgetedLLM` 里（那是硬兜底，会抛 `BudgetExceeded`），
+        # 但让它在下一次调用时炸出来是很糟的用户体验：报告里只剩一个异常。
+        # 在这里主动停，run 就能干干净净地落到 `failed`，报告里写清楚
+        # 「是预算掐的，不是改不出来」—— **两种失败的处理方式完全不同**。
+        breach = self._budget_breach()
+        if breach is not None:
+            log.warning("run 被成本熔断掐停：%s", breach)
+            return {
+                "verdict": "failed",
+                "errors": [f"budget: {breach}"],
+                "step_log": [f"evaluate: 预算耗尽，停止重试（{breach}）"],
+            }
+
         if state["retry_count"] < state["max_retries"]:
             n = state["retry_count"] + 1
             return {
@@ -228,6 +243,16 @@ class Nodes:
             "tool_calls": [_record(diff)],
             "step_log": ["finish"],
         }
+
+    def _budget_breach(self) -> str | None:
+        """超预算了吗。返回一句人话，或者 `None`。
+
+        `getattr` 兜底是因为**注入进来的不一定是 `BudgetedLLM`** ——
+        测试会塞各种假客户端，评测 harness 也允许自定义 agent。
+        节点不该因为「预算这个能力恰好没装」就崩掉。
+        """
+        breach = getattr(self.llm, "breach", None)
+        return breach() if callable(breach) else None
 
     def _usage_report(self) -> UsageReport:
         """把客户端的累计用量折算成成本。

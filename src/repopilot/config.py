@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -102,6 +102,23 @@ class Settings(BaseSettings):
 
     # --- Agent budget ---
     max_retries: int = 2
+
+    #: ★一个 run 的 token 上限，超了就熔断（`llm/budget.py`）。
+    #:
+    #: `max_retries` 是**次数**预算，拦不住「在次数以内烧掉任意多 token」——
+    #: 真实评测里撞到过三次：无解的题上模型反复推理，一次调用就烧光 16,384 个
+    #: 输出 token，产出为零。这一条补的就是那个洞。
+    #:
+    #: 默认值**是从实测分布推出来的，不是拍脑袋**：54 次真实 run 里，
+    #: 中位 4,258 token、p90 9,009、最大 39,062。120K ≈ 最大值的 3 倍 ——
+    #: 正常 run 一次都不会碰到，真跑飞了能兜住。
+    max_run_tokens: int | None = 120_000
+    #: 美元上限，**补充**而非主控：定价表查不到的模型成本是 `None`，
+    #: 没法比大小，于是它在最需要的时候恰好失效。token 那条永远有效。
+    #: 同样按实测定：最贵的一次 run 是 $0.0688（DeepSeek）。
+    #: ⚠️ 这个值和模型强相关 —— 换成 Opus 同样的活会贵一个量级，记得跟着调。
+    max_run_cost_usd: float | None = 1.00
+
     max_files_per_edit: int = 5
 
     # --- Safety limits ---
@@ -153,6 +170,17 @@ class Settings(BaseSettings):
     git_remote_base: str = "https://github.com"
     #: clone / apply / push 的墙钟超时。比工具超时长：clone 可能真的要一会儿。
     publish_timeout_seconds: float = 120.0
+
+    @field_validator("max_run_tokens", "max_run_cost_usd", mode="before")
+    @classmethod
+    def _blank_means_no_limit(cls, value):
+        """`REPOPILOT_MAX_RUN_TOKENS=` 留空 = 不限。
+
+        没有这个的话，留空会撞上 pydantic 的 `int_parsing` 报错 —— 而「留空」
+        恰恰是想关掉限制的人第一个会试的写法（环境变量没有"不设置"这个中间态，
+        你要么不写，要么写成空）。**报错不是坏事，报一个看不懂的错才是。**
+        """
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 #: 每个 provider 的默认模型。**只在用户没显式设 `REPOPILOT_MODEL` 时生效** ——
