@@ -324,6 +324,11 @@ uv run python scripts/bench.py --repeat 3    # 每个 case 跑 3 轮
   ★两者之差 11% 全是随机性
 ```
 
+> ⚠️ **这份数字是「修坏 case 之前」的。** 查 `false_success` 根因时发现
+> **3 个 case 是我自己出错了**（见下），修完单独重测 9/9 全绿。
+> 拼接估计可靠成功率会到 **83%**、`false_success` 从 9/54 降到 **3/54** ——
+> 但那是两次跑的拼接，**还没做过一次干净的全量重跑**，所以下面保留原始数字。
+
 | 类别 | 3 轮合计 | |
 |---|---|---|
 | `needs_dependency` | 6/6 | |
@@ -333,17 +338,44 @@ uv run python scripts/bench.py --repeat 3    # 每个 case 跑 3 轮
 | `cross_file` | 8/12 | |
 | **`unsolvable`** | **1/6** | ★最差的一档，见下 |
 
-**★ 最重要的数字不是 78%，是 `false_success = 9/54（17%）** —— Agent 说修好了，
-隐藏测试说没有。而且**它不是抖动，是稳定复现的**：
+### ★查 `false_success` 的根因：**是题出错了，不是 Agent 说谎**
+
+`cross-file-constant` 和 `none-guard` 连着 3 轮 `false_success`。
+**稳定复现意味着一定查得出根因** —— 查下去发现根因在评测集自己：
+
+| case | 病 |
+|---|---|
+| `cross-file-constant` | 可见测试写死 `order_total(200) == 210.0`，而 **210 正是错税率算出来的** |
+| `aware-datetime` | 可见测试传 naive datetime，而 docstring 明说参数带时区 |
+| `none-guard` | 隐藏测试要求「用户名也首字母大写」，但**任务和 docstring 都没说过** |
+
+前两个是同一种病：**可见测试和正确答案互斥**。而 Agent 的 `evaluate` 节点
+要求可见测试通过才算成功 —— 于是它**修对了反而被自己的测试判失败**，
+只能退回那个能让可见测试变绿的错误实现，然后自称成功。
+
+> 这类 case 测的不是 Agent 的能力，是它**愿不愿意迁就一个错的测试** ——
+> 而那恰好是 `needs_test_change` 那一档专门要考的，不该混进别的档。
+
+**真正的元 bug：自检漏了一条。** 老的自检只验「参考答案能过**隐藏**测试」，
+从没验过「参考答案能过**可见**测试」，所以这个矛盾一直看不见。补上
+`test_reference_solution_also_passes_the_visible_tests` 之后，它立刻就该抓到那两个。
+
+**评测集自己也要被评测，而「被评测」的覆盖面同样会有洞。**
+
+修完三个 case 单独重测：**9/9，三个都稳定 3/3**。
+
+### 修完之后剩下的才是真发现
+
+`false_success` 从 9/54 降到 **3/54，而且全部落在 `unsolvable` 那两个 case 上**：
 
 ```
-cross-file-constant      false_success × 3/3
-none-guard               false_success × 3/3
+unsolvable-contradictory      crashed, false_success, false_success
+unsolvable-secret-algorithm   correctly_gave_up, crashed, false_success
 ```
 
-这两个 case 上，Agent **每一轮都自信地报告成功**。接进真实流程就是：
-**约 1/6 的 PR 会带着「我修好了」推到审批闸门前，而实际是错的。**
-这就是 `running` 不能直达 `published` 的全部理由——不是流程洁癖，是有数据的。
+**一道无解的题，它宣称解决了。** 这才是幸存下来的、真实的结论：
+**这个 Agent 不知道自己不知道** —— 比修不好严重得多，也正是人工审批闸门
+拦的东西。
 
 **`unsolvable` 只有 1/6**，而且失败形态是 `false_success` 和 `crashed`，
 不是老老实实放弃。**这个 Agent 不知道自己不知道**——比修不好严重得多。
