@@ -144,23 +144,29 @@ class DeepSeekLLM:
                 },
             )
 
+            # ★`length` 必须在**解析之前**判掉。
+            #
+            # 它不是"模型不听话"，是**输出预算烧完了**：回复被从中间砍断。
+            # 而砍断会以两种完全不同的面目出现 ——
+            #   * 砍在 tool_call 的 arguments 里 → 半截 JSON → JSONDecodeError
+            #   * 砍在更早的地方           → 压根没有 tool_call
+            # 放在解析之后判，只能兜住第二种；第一种会先抛出一个
+            # 「arguments 不是合法 JSON」的报错，把人引向"模型输出格式有问题"，
+            # 而真正的原因是预算。**同一个根因不该有两副面孔。**
+            # （真踩到过：3 轮评测第一轮就撞上第一种。）
+            if _finish_reason(body) == "length":
+                raise LLMError(
+                    f"回复被 max_tokens={self._max_tokens} 截断（finish_reason=length），"
+                    f"本次已产出 {call.output_tokens} 个 output token。"
+                    f"思考模型的思考过程也吃 output 预算，"
+                    f"调大 REPOPILOT_MAX_TOKENS 或换非思考模型。"
+                )
+
             arguments = _tool_arguments(body)
             if arguments is None:
-                reason = _finish_reason(body)
-                # `length` 值得单独说人话：它不是"模型不听话"，是**输出预算烧完了**。
-                # 思考模型的思考过程本身就吃 output token，回复被从中间截断，
-                # 于是既没有 tool_call 也没有能解析的正文。报错不指出这一点的话，
-                # 人会去调 prompt —— 而真正该调的是 max_tokens（或者加成本熔断）。
-                if reason == "length":
-                    raise LLMError(
-                        f"回复被 max_tokens={self._max_tokens} 截断（finish_reason=length），"
-                        f"本次已产出 {call.output_tokens} 个 output token。"
-                        f"思考模型的思考过程也吃 output 预算，"
-                        f"调大 REPOPILOT_MAX_TOKENS 或换非思考模型。"
-                    )
                 raise LLMError(
                     f"model returned neither a tool_call nor parseable JSON "
-                    f"(finish_reason={reason})"
+                    f"(finish_reason={_finish_reason(body)})"
                 )
             try:
                 return schema.model_validate(arguments)

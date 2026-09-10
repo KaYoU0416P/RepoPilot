@@ -190,6 +190,42 @@ def _prose(content: str) -> dict:
     return {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
 
 
+async def test_a_tool_call_truncated_mid_json_still_blames_max_tokens():
+    """★同一个根因不该有两副面孔。
+
+    输出预算烧完会以两种面目出现：砍在 tool_call 的 arguments 里（半截 JSON），
+    或者砍在更早的地方（压根没有 tool_call）。如果把 `length` 放在解析**之后**
+    才判，第一种会先抛「arguments 不是合法 JSON」，把人引向"模型输出格式有问题"
+    —— 而真正的原因是预算。
+
+    真踩到过：3 轮评测第一轮就撞上第一种。
+    """
+    truncated = '{"summary": "Fix the contradictory contract", "approach": "The two te'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "tool_calls": [
+                                {"function": {"name": "test_outcome", "arguments": truncated}}
+                            ]
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 500, "completion_tokens": 16384},
+            },
+        )
+
+    with pytest.raises(LLMError) as exc:
+        await _llm(handler).structured(system="s", user="u", schema=TestOutcome)
+    assert "max_tokens" in str(exc.value)
+    assert "不是合法 JSON" not in str(exc.value), "别把预算问题报成格式问题"
+
+
 async def test_being_cut_off_by_max_tokens_says_so_in_plain_words():
     """★这个错真实咬过两次，报错必须指向 max_tokens 而不是让人去调 prompt。
 
