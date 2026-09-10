@@ -1,11 +1,11 @@
 """跑评测基准集。
 
-    uv run python scripts/bench.py                    # 跑全部 15 个
+    uv run python scripts/bench.py                    # 跑全部 18 个
     uv run python scripts/bench.py --only off-by-one  # 只跑指定的
     uv run python scripts/bench.py --json out.json    # 顺便存一份机读报表
 
-没有 ANTHROPIC_API_KEY 时会降级到 ScriptedLLM，那时**分数没有意义** ——
-ScriptedLLM 只认识内置样例仓库，在这 15 个 case 上基本全错。
+选中的 provider 没有 key 时会降级到 ScriptedLLM，那时**分数没有意义** ——
+ScriptedLLM 只认识内置样例仓库，在这 18 个 case 上基本全错。
 脚本会明确警告，别拿那个数字当结果。
 """
 
@@ -34,9 +34,18 @@ async def main() -> int:
 
     if settings.llm_provider == "scripted":
         print(
-            "\n⚠  当前是 ScriptedLLM（没有 ANTHROPIC_API_KEY）。\n"
+            "\n⚠  当前是 ScriptedLLM（没有配 provider 的 API key）。\n"
             "   它只认识内置样例仓库，在这些 case 上会几乎全错。\n"
             "   这一轮只能验证 harness 通不通，分数没有意义。\n",
+            file=sys.stderr,
+        )
+    else:
+        # 报表里的成本按模型单价算 —— 跑之前就该看见自己在跑哪个模型，
+        # 而不是跑完对着一个 `cost_usd: null` 猜是哪里错了。
+        known = settings.pricing_for(settings.model) is not None
+        priced = "有单价" if known else "★定价表里没有，成本会是 null"
+        print(
+            f"\n▶  provider={settings.llm_provider}  model={settings.model}（{priced}）\n",
             file=sys.stderr,
         )
 

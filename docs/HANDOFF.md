@@ -194,7 +194,7 @@ pytest 有 `pythonpath=["src"]` 兜底，但 **uvicorn 和 scripts/ 下的脚本
 make sync / db-up / db-reset / psql
 make test (276 passed / 2 skipped) / test-fast / test-nodb
 make demo / run(:8000, /docs)
-make bench (需 ANTHROPIC_API_KEY) / bench-check (不花钱)
+make bench (需 provider 的 API key) / bench-check (不花钱)
 make mcp / mcp-smoke
 make trace (开着 OTel 跑一次 demo，span 打到 stderr)
 ```

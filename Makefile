@@ -38,8 +38,8 @@ test-nodb: sync
 	              tests/test_search_code.py tests/test_graph.py
 
 # ------------------------------------------------------------------ 评测
-# 跑 15 个 seeded bug，出成功率 / 重试 / 工具分布 / 失败原因报表。
-# 没有 ANTHROPIC_API_KEY 时会降级到 ScriptedLLM，那时分数没有意义，
+# 跑 18 个 case（15 seeded bug + 3 注入），出成功率 / 成本 / 重试 / 失败原因报表。
+# 选中的 provider 没有 key 时会降级到 ScriptedLLM，那时分数没有意义，
 # 只能验证 harness 通不通 —— 脚本自己会警告。
 bench: sync
 	uv run python scripts/bench.py --json bench-report.json
