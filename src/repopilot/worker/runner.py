@@ -16,7 +16,7 @@ from repopilot.db.models import RunRow
 from repopilot.domain import RunStatus
 from repopilot.evaluation import evaluate_run
 from repopilot.llm import build_llm
-from repopilot.observability import get_logger, run_id_var
+from repopilot.observability import get_logger, run_id_var, set_attrs, span
 from repopilot.tools import build_registry
 from repopilot.worker.bus import EventBus
 from repopilot.workspace import WorkspaceManager
@@ -70,18 +70,37 @@ class Runner:
                 str(row.id), row.task, row.repo_path, self.settings.max_retries
             )
 
-            async for chunk in graph.astream(state, stream_mode="updates"):
-                for node_name, partial in chunk.items():
-                    state = {**state, **_merge(state, partial)}
-                    emit(
-                        "node_completed",
-                        node=node_name,
-                        message=(partial.get("step_log") or [node_name])[-1],
-                        verdict=state.get("verdict"),
-                        retry_count=state.get("retry_count", 0),
-                    )
+            # 一次 run = 一条 trace 的根 span。六个节点 span、几十个工具 span
+            # 都靠 ContextVar 自动挂在它底下 —— LangGraph 给节点开新 Task 时会
+            # **拷贝**一份当前上下文，所以父子关系不用我们手工往下传。
+            #
+            # 已知取舍：根 span 只圈住"跑图 + 评估"，不含建 workspace 和落库。
+            # 那两段目前没埋点，圈进来也只是一段空白；真要做端到端延迟归因时再扩。
+            with span("run", run_id_full=str(row.id), attempt=row.attempts) as run_span:
+                async for chunk in graph.astream(state, stream_mode="updates"):
+                    for node_name, partial in chunk.items():
+                        state = {**state, **_merge(state, partial)}
+                        emit(
+                            "node_completed",
+                            node=node_name,
+                            message=(partial.get("step_log") or [node_name])[-1],
+                            verdict=state.get("verdict"),
+                            retry_count=state.get("retry_count", 0),
+                        )
 
-            report = evaluate_run(state)
+                report = evaluate_run(state)
+                usage = report.usage
+                set_attrs(
+                    run_span,
+                    verdict=state.get("verdict"),
+                    task_success=report.task_success,
+                    retries=state.get("retry_count", 0),
+                    **{
+                        "llm.calls": usage.usage.calls,
+                        "llm.total_tokens": usage.usage.total_tokens,
+                        "llm.cost_usd": usage.cost_usd,
+                    },
+                )
             duration_ms = int((time.perf_counter() - started) * 1000)
 
             if report.task_success:

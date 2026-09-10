@@ -1,4 +1,4 @@
-.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo clean
+.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace clean
 
 # uv 在这台机器上写出来的 .pth 带 macOS UF_HIDDEN 标志，而 CPython 的 site.py
 # 会静默跳过隐藏的 .pth -> import repopilot 失败。详见 docs/failures.md。
@@ -61,6 +61,11 @@ run: sync db-up
 
 demo: sync
 	uv run python scripts/demo.py
+
+# 开着 OTel 跑一次 demo：run / node / tool 三层 span 以 JSON 打到 **stderr**。
+# 平时默认关（otel_enabled=false），不然 span 的噪音会盖过日志。
+trace: sync
+	REPOPILOT_OTEL_ENABLED=true uv run --no-sync python scripts/demo.py
 
 # MCP server（stdio）。手动起一般只是为了看它没崩 —— 正常用法是让
 # Claude Desktop / Claude Code 去 spawn 它，配置见 scripts/mcp_server.py 头注释。

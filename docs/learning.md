@@ -722,3 +722,132 @@ jsonb 得写 `(evaluation->'usage'->>'cost_usd')::numeric`，能查但索引不�
 真到那一步，正确做法是把这个标量**提升成一个 `numeric` 列**（钱不用 float），
 明细继续留在 jsonb 里。**Java 对照**：就是宽表 vs. JSON 列那个老问题，
 PG 的 jsonb 让你可以先不选。
+
+## OpenTelemetry：日志之外，还需要知道时间花在哪
+
+日志回答**发生了什么**，trace 回答**时间花在哪、谁调了谁**。
+一个 run 打出三十行日志，你知道每一步做了什么，但不知道那 47 秒里
+有 43 秒卡在 `run_tests` 上 —— 日志天生是**扁平**的，而调用是**树形**的。
+
+**Java 对照**：SkyWalking / Zipkin / Micrometer Tracing 是同一组概念，
+连术语都不用换：trace（一次完整请求）→ span（其中一段工作）→
+context 传播（父子关系怎么往下传）。**唯一换掉的是传播的载体：
+Java 用 ThreadLocal，Python asyncio 用 ContextVar。**
+
+### 为什么埋点代码里一处 `if enabled:` 都没有
+
+OTel 拆成 `opentelemetry-api` 和 `opentelemetry-sdk` 两个包，这不是包管理洁癖：
+
+**没装配 provider 时，`trace.get_tracer()` 返回的是 no-op 实现** ——
+`start_as_current_span` 什么都不做，不分配对象、不记录、不导出。
+
+所以埋点可以无条件写，开关只在 `setup_tracing()` 一处。
+
+> **Java 对照**：SLF4J 的 API 和 logback 实现是两个 jar，没绑定实现时日志
+> 静默丢弃，调用方从来不写 `if (logger != null)`。一模一样的套路。
+
+`trace.get_tracer()` 在装配**之前**调用也没关系：它返回的 `ProxyTracer`
+在第一次开 span 时才去解析真正的 provider。所以模块级 `_tracer = get_tracer(...)`
+和 `setup_tracing()` 的先后顺序无关 —— 这个懒解析是故意设计的。
+
+### 埋在哪：一处包住 N 个
+
+| span | 埋点位置 | 覆盖 |
+|---|---|---|
+| `node.*` | `agent/graph.py` 的 `add_node()` 装配处 | 6 个节点 |
+| `tool.*` | `ToolRegistry.call` | 6 个工具 |
+| `git.*` | `GitHubPublisher._git` | 全部 git 子命令 |
+| `llm.structured` | `AnthropicLLM.structured` | 唯一的模型出口 |
+
+节点埋点**放在装配处而不是六个方法上**：横切关注点集中在「东西被接起来」
+的那一行，节点方法保持「拿 state、干活、返回 partial」的纯粹。
+加第七个节点，它自动就有 span。**Java 对照：AOP 的环绕通知织在配置层，
+业务方法不知道自己被监控着。**
+
+这和当初把超时/并发上限/异常降级收进 `ToolRegistry` 是同一个回报：
+**你只要有一个"所有 X 都必经"的地方，加任何横切能力都是一处的事。**
+
+### ★吞异常的地方，trace 会跟着一起骗你
+
+这是这次最值得记的一条。
+
+`ToolRegistry.call` 把所有异常吃成 `ok=False` 的返回值 —— 这是**对的**，
+一个坏工具不能杀掉整个 run。但 OTel 只在**异常冒出去**时才自动把 span 标红：
+
+```python
+except Exception as exc:
+    result = ToolResult(tool=name, ok=False, error=...)   # 异常在这里死了
+# → 没有异常到达 OTel → span 状态 UNSET → 界面上是绿的
+```
+
+于是一条**全是失败**的链路在 trace 里显示成全绿。可观测性从"看不见"
+退化成"看见错的"，后者更糟。
+
+> **通用结论：凡是把异常转成返回值的地方（错误码、Result 类型、
+> `ok=False` 信封），都必须手动把 span 状态补回去。**
+> Java 那边同理：`try/catch` 里 `return null` 的方法，Micrometer 的
+> `Observation` 也不会自己标错。
+
+`test_a_swallowed_tool_error_still_turns_the_span_red` 钉住这一条。
+
+### 父子关系不用手工传（这是 Python 的便宜）
+
+`start_as_current_span` 把新 span 写进 ContextVar。嵌套调用自动认它当父亲，
+**包括 `asyncio.gather` 分出去的协程** —— 创建 Task 时会拷贝一份当前上下文。
+
+所以 `plan` 节点里那一把并发 `read_file` / `search_code`，八个 span 整整齐齐
+挂在一个 `node.plan` 底下，一行传播代码都没写。
+
+Java 那边跨线程要手动做（`ContextSnapshot`、`TaskDecorator`、
+或者字节码增强帮你做）—— 因为 ThreadLocal 不会跟着线程池里的任务跑。
+Python 的 contextvars 是语言内建的，`asyncio.Task` 天然拷贝。
+
+### 什么时候**不该**把两段串成一条 trace
+
+`run` 和 `publish` 是**两条 trace**，不是一条。
+
+中间隔着人工审批：可能几小时后、另一个进程、甚至另一台机器。
+硬串成一条会得到一个**跨度几小时、中间全是空白**的 span —— 那不是信息，
+是噪音，还会把所有基于 trace 时长的告警搞坏。
+
+它们靠 `run_id` 属性关联。这也是为什么 `run_id` 值得**冗余写进每个 span**
+而不是只写根节点：**trace 后端按属性检索是 per-span 的**，只有根节点带
+run_id 就没法直接查"这个 run 的所有慢工具"。
+
+> 真要串起来的做法是：把 W3C `traceparent` 存进数据库，发布时取出来当父上下文。
+> 这就是"跨进程 context 传播"的完整形态，也是 HTTP 头里那个
+> `traceparent: 00-<trace_id>-<span_id>-01` 的来历。
+
+### 三个会咬人的默认值
+
+1. **`ConsoleSpanExporter` 默认写 stdout。** 在这个项目里那是会炸的：
+   MCP server 走 stdio，stdout 就是 JSON-RPC 的协议通道。
+   `setup_logging` 已经踩过一次，这次直接把库里的默认值改成 stderr ——
+   **危险的默认值应该在库那一层修掉，不要指望每个调用方记得传参。**
+2. **`BatchSpanProcessor` 在进程退出时会丢掉没 flush 的那批。**
+   对着控制台调试时，"span 有时候不出现"比慢一点糟糕得多 →
+   用 `SimpleSpanProcessor`（同步导出）。接真后端时再换回 batch，
+   换的是**装配那一行**，埋点一处不动。
+3. **属性值只接受 `str/bool/int/float`（和它们的序列）。**
+   塞个 `Path` 进去不会抛异常，只打一条警告然后**丢掉** —— 又一个静默失效。
+   统一在 `set_attrs()` 里兜住。
+
+### span 属性是明文，而且会导出到别人家
+
+`git.*` 的 span 名只取子命令（`git.push`），**绝不把完整 command 写进属性**：
+`git push` 的参数里带着 remote URL，而 URL 的 userinfo 里塞着 PAT。
+
+日志那边已经有 `redact` 在兜底，**trace 是同一类外泄通道**，而且更危险 ——
+日志通常留在自己机器上，span 是要导出给第三方后端的。
+和审计日志只留 sha256 是同一个判断：**先想"这条记录会流到哪去"，再决定放什么。**
+
+### 怎么测 trace
+
+用 `InMemorySpanExporter`，不要去解析控制台输出。span 在内存里是**结构化对象**，
+可以直接断言父子关系（`child.parent.span_id == parent.context.span_id`）和属性。
+
+这正是 OTel 把 exporter 做成可替换接口的价值：**测试和生产走同一条 SDK 路径，
+只换最后一段出口。** Java 那边的 `InMemorySpanExporter` / `TestSpanHandler` 一样。
+
+一个坑：**全局 TracerProvider 一个进程只能装一次**，重复 `set_tracer_provider`
+会被拒绝并打警告。所以在 import 时装一次，用 fixture 在每个用例前 `clear()`。

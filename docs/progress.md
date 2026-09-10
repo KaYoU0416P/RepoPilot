@@ -34,6 +34,35 @@
 
 ## NOW
 
+### Stage D 第三步 — OpenTelemetry 链路追踪（257 passed / 2 skipped，ruff 全绿）
+
+日志回答「发生了什么」，trace 回答「时间花在哪、谁调了谁」。
+这就是 Java 那边 SkyWalking / Zipkin 的同一组概念：trace / span / context 传播，
+**只是传播的载体从 ThreadLocal 换成了 ContextVar**。
+
+- `observability/tracing.py`：`setup_tracing()` + `span()` + `mark_error()`。
+  **全文件没有一处 `if enabled:`** —— OTel 的 api/sdk 是两个包，没装配 provider 时
+  `get_tracer()` 返回 no-op 实现，埋点零成本。（**Java 对照**：SLF4J API 没绑定
+  实现时日志静默丢弃，调用方不写 `if (logger != null)`。）
+- **四层 span**：`run`（`worker/runner.py`）→ `node.*`（**埋在 `graph.py` 装配处**，
+  一处包住 6 个节点，等于 AOP 的环绕通知）→ `tool.*`（`ToolRegistry.call`，
+  一处包住 6 个工具）→ `llm.structured`（带 token 属性，让「慢」和「贵」对上号）。
+  发布链路是**另一条 trace**：`publish` / `git.*` / `github.pull_request`。
+- **`run_id` 冗余写进每个 span**，不是只写根节点：trace 后端按属性检索是
+  per-span 的，只有根节点带 run_id 就没法查「这个 run 的所有慢工具」。
+  也是发布那条 trace 和 run 那条能关联起来的唯一线索。
+- ★**吞异常的地方必须手动标错**：`ToolRegistry.call` 把异常吃成 `ok=False`
+  返回值，于是没有异常冒到 OTel 面前 —— 不补 `mark_error` 的话，一条全是
+  失败的链路在 trace 里是全绿的。`test_a_swallowed_tool_error_still_turns_the_span_red`
+  钉住这一条。
+- **ConsoleSpanExporter 默认写 stdout，这里改成 stderr**：`mcp/server.py` 的
+  stdout 就是 JSON-RPC 协议通道。危险的默认值在库这层就修掉，不指望调用方记得传参。
+  `REPOPILOT_OTEL_ENABLED=true make mcp-smoke` 验证过握手仍然干净。
+- 用 `SimpleSpanProcessor` 不是 `BatchSpanProcessor`：batch 在进程退出时会丢掉
+  没 flush 的那批，"span 有时候不出现"比慢一点糟糕得多。接真后端时再换。
+- 默认**关**（`otel_enabled=false`），`make trace` 临时打开跑一次 demo。
+  实测一次 run = 1 条 trace / 14 个 span，三层嵌套正确。
+
 ### Stage D 第二步 — Token 计量与成本控制（244 passed / 2 skipped，ruff 全绿）
 
 **插桩点只有一个**：`LLMClient` 只有 `structured()` 一个方法，所以整个系统
@@ -174,21 +203,18 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
 
 ## NEXT
 
-1. **OpenTelemetry**：每个图节点、每个工具调用、发布链路各一个 span，
-   `run_id` 当 trace 属性（`run_id_var` 这个 ContextVar 地基已经铺好）。
-   导出到控制台即可。
-2. **拿真 key 跑一轮 `make bench`**，把报表数字记进 learning.md。
+1. **拿真 key 跑一轮 `make bench`**，把报表数字记进 learning.md。
    现在只用 ScriptedLLM 验证过 harness 通，**没有真实分数**；
    三个注入 case 也**没跑过真模型**，所以现在只能说「设计了防护」，
    不能说「防护有效」。
-3. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
+2. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
    内置样例仓库；发布链路本身已经能处理真实 clone（`GitHubPublisher` 就是
    `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
-4. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
+3. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
    **必须排在第 3 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
-5. **简历项目描述 + 面试 30 秒自述稿**。README 已经更新到位，但简历上那一段
+4. **简历项目描述 + 面试 30 秒自述稿**。README 已经更新到位，但简历上那一段
    还没写。素材全在 `docs/learning.md`。
-6. **`docs/HANDOFF.md` 已严重过期**：还写着「Stage A 完成，75 passed，3 个
+5. **`docs/HANDOFF.md` 已严重过期**：还写着「Stage A 完成，75 passed，3 个
    commit」，Stage B / C / MCP 全没有。它是给下一个 Agent 的交接提示词，
    过期的交接比没有交接更糟。
 
@@ -237,4 +263,20 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
 - **没有预算熔断**。现在只是「记账」，没有「一个 run 烧超过 $X 就掐掉」。
   `max_retries` 是次数预算不是金额预算 —— 这是成本控制真正缺的那一半。
 - 评测只跑一轮。LLM 有随机性，严谨做法是每个 case 跑 n 次取分布。
+- **trace 只导到控制台**，没接 OTLP / Jaeger / Tempo。而且用的是
+  `SimpleSpanProcessor`（同步导出），长期开着会拖慢主流程。接真后端时要换成
+  `BatchSpanProcessor` + OTLP exporter —— 换的是**装配那一行**，埋点一处不用动，
+  这正是 OTel 的 api/sdk 拆分买来的东西。
+- **`ScriptedLLM` 没埋 span**，所以 `make demo` / `make bench` 的 trace 里看不到
+  `llm.structured`。是刻意的（测试替身既没延迟也没 token），但代价是
+  「LLM 那段最耗时」这个结论在离线跑里看不出来。
+- **HTTP 入口没埋点**：webhook 收包 → 验签 → 入队这段不在任何 trace 里，
+  trace 是从 worker 领到任务才开始的。
+- **run 和 publish 是两条 trace，不是一条**。中间隔着人工审批（可能几小时、
+  另一个进程），硬串成一条会得到一个跨度几小时、中间全是空白的 span。
+  它们靠 `run_id` 属性关联 —— 真要串起来得把 W3C `traceparent` 存进数据库再取出来，
+  那才是「跨进程 context 传播」的完整做法。
+- **只有 trace，没有 metrics**。成功率 / 成本这些聚合值还是评测报表自己算的，
+  没走 OTel Metrics API，也就没有 Prometheus 那种时序视图。
+- 数据库调用（asyncpg）没埋点，慢查询在 trace 里是一段空白。
 - 评测不给"改动幅度"打分：重写整个文件和一行改对，现在得分一样。

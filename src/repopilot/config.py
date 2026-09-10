@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     #: 关掉后 API 只入队不执行，方便单独起 worker 进程。
     enable_worker: bool = True
 
+    # --- 可观测（Stage D）---
+    #: 默认关。开了之后每个 span 会以一坨 JSON 打到 **stderr**，
+    #: 平时开发时噪音太大；`make trace` 会临时打开它。
+    otel_enabled: bool = False
+    otel_service_name: str = "repopilot"
+
     # --- GitHub（Stage B）---
     #: PAT。开 PR / 回写评论用，不碰 OAuth。
     github_token: str = ""

@@ -17,7 +17,7 @@ from pathlib import Path
 from repopilot.config import PROJECT_ROOT, get_settings
 from repopilot.evaluation.bench import format_report, load_cases
 from repopilot.evaluation.harness import BenchHarness
-from repopilot.observability import setup_logging
+from repopilot.observability import setup_logging, setup_tracing
 
 CASES_ROOT = PROJECT_ROOT / "benchmarks" / "cases"
 
@@ -30,6 +30,7 @@ async def main() -> int:
 
     setup_logging()
     settings = get_settings()
+    setup_tracing(enabled=settings.otel_enabled, service_name=settings.otel_service_name)
 
     if settings.llm_provider == "scripted":
         print(

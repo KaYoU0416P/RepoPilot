@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from repopilot.api.routes import router
 from repopilot.config import get_settings
 from repopilot.db import close_pool, init_pool
-from repopilot.observability import get_logger, setup_logging
+from repopilot.observability import get_logger, setup_logging, setup_tracing
 from repopilot.worker import EventBus, Worker
 
 log = get_logger(__name__)
@@ -24,6 +24,9 @@ log = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     settings = get_settings()
+    tracing = setup_tracing(
+        enabled=settings.otel_enabled, service_name=settings.otel_service_name
+    )
 
     await init_pool(
         settings.database_url,
@@ -42,10 +45,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("worker 已随 API 进程启动 (enable_worker=true)")
 
     log.info(
-        "RepoPilot 就绪 | provider=%s model=%s db=%s",
+        "RepoPilot 就绪 | provider=%s model=%s db=%s trace=%s",
         settings.llm_provider,
         settings.model,
         settings.database_url.rsplit("@", 1)[-1],
+        "on" if tracing else "off",
     )
     try:
         yield

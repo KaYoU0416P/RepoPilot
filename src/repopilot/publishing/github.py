@@ -24,7 +24,7 @@ from urllib.parse import urlparse, urlunparse
 from repopilot.config import Settings
 from repopilot.db.models import RunRow
 from repopilot.github import GitHubClient, GitHubError, parse_external_ref
-from repopilot.observability import get_logger
+from repopilot.observability import get_logger, mark_error, set_attrs, span
 from repopilot.publishing.base import PublishError, PublishResult
 from repopilot.sandbox import run_command
 
@@ -108,13 +108,20 @@ class GitHubPublisher:
 
         branch = branch_name(row.id)
         workdir = Path(tempfile.mkdtemp(prefix=f"publish-{str(row.id)[:8]}-"))
-        try:
-            await self._prepare_branch(workdir, row, branch)
-            await self._push(workdir, repo, branch)
-            return await self._open_pr_and_comment(row, repo, issue_number, branch)
-        finally:
-            # 发布产物已经在远端了，本地这份临时目录没有任何保留价值。
-            shutil.rmtree(workdir, ignore_errors=True)
+        # 发布是**另一条 trace**，不是 run 那条的延续：中间隔着人工审批，
+        # 可能是几小时后、另一个进程、甚至另一台机器。硬把两者串成一条 trace
+        # 只会得到一个跨度几小时、中间全是空白的 span。
+        # 它们靠 `run_id` 这个属性关联 —— 这正是 run_id 值得冗余写进每个 span 的原因。
+        with span("publish", repo=repo, issue=issue_number, branch=branch) as current:
+            try:
+                await self._prepare_branch(workdir, row, branch)
+                await self._push(workdir, repo, branch)
+                result = await self._open_pr_and_comment(row, repo, issue_number, branch)
+                set_attrs(current, pr_url=result.pr_url, detail=result.detail)
+                return result
+            finally:
+                # 发布产物已经在远端了，本地这份临时目录没有任何保留价值。
+                shutil.rmtree(workdir, ignore_errors=True)
 
     # ------------------------------------------------------------ git 那半边
     async def _prepare_branch(self, workdir: Path, row: RunRow, branch: str) -> None:
@@ -179,26 +186,29 @@ class GitHubPublisher:
         self, row: RunRow, repo: str, issue_number: int, branch: str
     ) -> PublishResult:
         try:
-            # ★幂等：先看这个分支上是不是已经开过 PR 了。
-            # 上一次在「push 成功、开 PR 之前」崩掉的话，这里就能捡回来。
-            existing = await self.client.find_pull_request(repo, head_branch=branch)
-            if existing is not None:
-                log.info("run=%s 分支 %s 上已有 PR，复用不重开", row.id, branch)
-                pr = existing
-            else:
-                base = await self.client.get_default_branch(repo)
-                pr = await self.client.create_pull_request(
-                    repo,
-                    head=branch,
-                    base=base,
-                    title=self._pr_title(row, issue_number),
-                    body=self._pr_body(row, issue_number),
-                )
+            with span("github.pull_request", repo=repo, branch=branch) as current:
+                # ★幂等：先看这个分支上是不是已经开过 PR 了。
+                # 上一次在「push 成功、开 PR 之前」崩掉的话，这里就能捡回来。
+                existing = await self.client.find_pull_request(repo, head_branch=branch)
+                if existing is not None:
+                    log.info("run=%s 分支 %s 上已有 PR，复用不重开", row.id, branch)
+                    pr = existing
+                else:
+                    base = await self.client.get_default_branch(repo)
+                    pr = await self.client.create_pull_request(
+                        repo,
+                        head=branch,
+                        base=base,
+                        title=self._pr_title(row, issue_number),
+                        body=self._pr_body(row, issue_number),
+                    )
+                # 幂等路径被走中的次数，是"崩溃重试到底安不安全"唯一的现场证据。
+                set_attrs(current, reused=existing is not None)
 
-            pr_url = pr.get("html_url")
-            comment = await self.client.comment_on_issue(
-                repo, issue_number, f"RepoPilot 已提交修复：{pr_url}"
-            )
+                pr_url = pr.get("html_url")
+                comment = await self.client.comment_on_issue(
+                    repo, issue_number, f"RepoPilot 已提交修复：{pr_url}"
+                )
         except GitHubError as exc:
             # 4xx 是我们自己的问题（权限/参数），重试没意义 → 不重试。
             # 5xx / 429 是对方的问题，值得重试 → 让它作为普通异常冒出去，
@@ -253,11 +263,17 @@ class GitHubPublisher:
         走 `sandbox.run_command` 而不是 `subprocess`：白拿墙钟超时和进程组
         kill —— 一个卡在网络上的 git push 不能把 worker 拖住。
         """
-        result = await run_command(
-            command, cwd=cwd, timeout=self.settings.publish_timeout_seconds, env=env or GIT_ENV
-        )
-        if not result.ok:
-            detail = (result.stderr or result.stdout or "").strip()
-            for secret in redact or []:
-                detail = detail.replace(secret, "***")
-            raise PublishError(f"{failure}: {detail[:500]}")
+        # ★span 名字只取子命令（clone / push / apply…），**绝不把 command 整个
+        # 写进属性**：`git push` 的参数里带着 remote URL，而 URL 的 userinfo 里
+        # 塞着 PAT。日志那边已经有 `redact` 在兜底，trace 是同一类外泄通道，
+        # 属性里放什么必须一样谨慎 —— span 属性是明文，而且会被导出到别人家。
+        with span(f"git.{command[1]}", cwd=cwd.name) as current:
+            result = await run_command(
+                command, cwd=cwd, timeout=self.settings.publish_timeout_seconds, env=env or GIT_ENV
+            )
+            if not result.ok:
+                detail = (result.stderr or result.stdout or "").strip()
+                for secret in redact or []:
+                    detail = detail.replace(secret, "***")
+                mark_error(current, failure)
+                raise PublishError(f"{failure}: {detail[:500]}")

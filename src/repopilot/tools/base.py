@@ -14,7 +14,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from repopilot.observability import get_logger
+from repopilot.observability import get_logger, mark_error, set_attrs, span
 from repopilot.workspace import PathEscapeError, Workspace
 
 log = get_logger(__name__)
@@ -92,37 +92,50 @@ class ToolRegistry:
             return ToolResult(tool=name, ok=False, error=f"unknown tool: {name}")
 
         started = time.perf_counter()
-        async with self._semaphore:
-            try:
-                result = await asyncio.wait_for(
-                    spec.fn(workspace, **kwargs),
-                    timeout=timeout or self._timeout,
+        # span 从这里开、把信号量也圈进去：**排队等许可的时间也是延迟**。
+        # 只量"真正执行"那一段，看到的是一份自欺欺人的耗时 ——
+        # 一个 40 文件的计划卡在 max_concurrency=4 上，慢就慢在等许可。
+        with span(f"tool.{name}", **{"tool.name": name, "tool.risk": spec.risk}) as current:
+            async with self._semaphore:
+                queued_ms = int((time.perf_counter() - started) * 1000)
+                set_attrs(current, **{"tool.queued_ms": queued_ms})
+                try:
+                    result = await asyncio.wait_for(
+                        spec.fn(workspace, **kwargs),
+                        timeout=timeout or self._timeout,
+                    )
+                except TimeoutError:
+                    result = ToolResult(tool=name, ok=False, error="tool timed out")
+                except PathEscapeError as exc:
+                    result = ToolResult(tool=name, ok=False, error=f"blocked by sandbox: {exc}")
+                except NotImplementedError as exc:
+                    result = ToolResult(tool=name, ok=False, error=f"not implemented: {exc}")
+                except TypeError as exc:
+                    result = ToolResult(tool=name, ok=False, error=f"bad arguments: {exc}")
+                except Exception as exc:  # noqa: BLE001 - a bad tool must not kill the run
+                    result = ToolResult(tool=name, ok=False, error=f"{type(exc).__name__}: {exc}")
+
+            result.duration_ms = int((time.perf_counter() - started) * 1000)
+            log.info("tool=%s ok=%s %dms", name, result.ok, result.duration_ms)
+
+            # ★上面那一串 except 把所有异常都吃成了 `ok=False` 的返回值，
+            # 于是没有异常冒到 OTel 面前 —— 不手动标错的话，一条全是失败的
+            # 链路在 trace 里是全绿的。见 `observability/tracing.mark_error`。
+            set_attrs(current, **{"tool.ok": result.ok})
+            if not result.ok:
+                mark_error(current, result.error or "tool failed")
+
+            if spec.risk in _AUDITED:
+                audit.info(
+                    "risk=%s tool=%s ok=%s %dms %s%s",
+                    spec.risk,
+                    name,
+                    result.ok,
+                    result.duration_ms,
+                    _audit_args(kwargs),
+                    f" error={result.error}" if result.error else "",
                 )
-            except TimeoutError:
-                result = ToolResult(tool=name, ok=False, error="tool timed out")
-            except PathEscapeError as exc:
-                result = ToolResult(tool=name, ok=False, error=f"blocked by sandbox: {exc}")
-            except NotImplementedError as exc:
-                result = ToolResult(tool=name, ok=False, error=f"not implemented: {exc}")
-            except TypeError as exc:
-                result = ToolResult(tool=name, ok=False, error=f"bad arguments: {exc}")
-            except Exception as exc:  # noqa: BLE001 - a bad tool must not kill the run
-                result = ToolResult(tool=name, ok=False, error=f"{type(exc).__name__}: {exc}")
-
-        result.duration_ms = int((time.perf_counter() - started) * 1000)
-        log.info("tool=%s ok=%s %dms", name, result.ok, result.duration_ms)
-
-        if spec.risk in _AUDITED:
-            audit.info(
-                "risk=%s tool=%s ok=%s %dms %s%s",
-                spec.risk,
-                name,
-                result.ok,
-                result.duration_ms,
-                _audit_args(kwargs),
-                f" error={result.error}" if result.error else "",
-            )
-        return result
+            return result
 
 
 #: 超过这个长度的参数值不进日志，只留长度 + 摘要。

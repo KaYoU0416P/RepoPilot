@@ -24,7 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 from repopilot.llm.base import LLMError
 from repopilot.llm.usage import Usage
-from repopilot.observability import get_logger
+from repopilot.observability import get_logger, set_attrs, span
 
 log = get_logger(__name__)
 T = TypeVar("T", bound=BaseModel)
@@ -49,36 +49,54 @@ class AnthropicLLM:
         tool_name = _snake(schema.__name__)
         json_schema = schema.model_json_schema()
 
-        response = await self._client.messages.create(
-            model=self.model,
-            max_tokens=self._max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            tools=[
-                {
-                    "name": tool_name,
-                    "description": schema.__doc__ or f"Return a {schema.__name__}",
-                    "input_schema": json_schema,
-                }
-            ],
-            tool_choice={"type": "tool", "name": tool_name},
-        )
+        # 这个 span 是整条 trace 里唯一"钱花在哪"看得见的地方：节点 span 的
+        # 耗时九成在这一段，而 token 属性让"慢"和"贵"能对上号。
+        # **只有真实 provider 埋点，`ScriptedLLM` 不埋** —— 测试替身既没有延迟
+        # 也没有 token，给它开 span 纯属仪式感。
+        attrs = {"llm.model": self.model, "llm.schema": schema.__name__}
+        with span("llm.structured", **attrs) as current:
+            response = await self._client.messages.create(
+                model=self.model,
+                max_tokens=self._max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                tools=[
+                    {
+                        "name": tool_name,
+                        "description": schema.__doc__ or f"Return a {schema.__name__}",
+                        "input_schema": json_schema,
+                    }
+                ],
+                tool_choice={"type": "tool", "name": tool_name},
+            )
 
-        # 计量放在解析**之前**：schema 校验失败照样是花了钱的。
-        # 只在成功路径上记账，等于给自己发了一张少算的账单。
-        self.usage = self.usage + _usage_of(response)
+            # 计量放在解析**之前**：schema 校验失败照样是花了钱的。
+            # 只在成功路径上记账，等于给自己发了一张少算的账单。
+            call = _usage_of(response)
+            self.usage = self.usage + call
+            set_attrs(
+                current,
+                **{
+                    "llm.input_tokens": call.total_input_tokens,
+                    "llm.output_tokens": call.output_tokens,
+                    "llm.cache_read_tokens": call.cache_read_input_tokens,
+                    "llm.stop_reason": getattr(response, "stop_reason", None),
+                },
+            )
 
-        for block in response.content:
-            if block.type == "tool_use":
-                try:
-                    return schema.model_validate(block.input)
-                except ValidationError as exc:
-                    got = json.dumps(block.input)[:500]
-                    raise LLMError(
-                        f"{schema.__name__} validation failed: {exc}\ngot: {got}"
-                    ) from exc
+            for block in response.content:
+                if block.type == "tool_use":
+                    try:
+                        return schema.model_validate(block.input)
+                    except ValidationError as exc:
+                        got = json.dumps(block.input)[:500]
+                        raise LLMError(
+                            f"{schema.__name__} validation failed: {exc}\ngot: {got}"
+                        ) from exc
 
-        raise LLMError(f"model returned no tool_use block (stop_reason={response.stop_reason})")
+            raise LLMError(
+                f"model returned no tool_use block (stop_reason={response.stop_reason})"
+            )
 
 
 def _usage_of(response) -> Usage:

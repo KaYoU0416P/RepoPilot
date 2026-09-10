@@ -35,7 +35,7 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 244 passed / 2 skipped
+make test          # 257 passed / 2 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
@@ -159,6 +159,59 @@ SYSTEM 只有 959 字符 ≈ 240 token。**低于下限不报错，只是静默�
 而写缓存按 1.25 倍计费。所以先量再说：`cache_read_input_tokens` 已经接进报表，
 它长期是 0 就说明缓存没生效。
 
+### 链路追踪（OpenTelemetry）
+
+日志回答「发生了什么」，trace 回答「时间花在哪、谁调了谁」。
+和 Java 的 SkyWalking / Zipkin 是同一组概念——trace / span / context 传播——
+**只是传播的载体从 ThreadLocal 换成了 ContextVar**。
+
+```bash
+make trace     # = REPOPILOT_OTEL_ENABLED=true make demo，span 以 JSON 打到 stderr
+```
+
+一次 run 是**一条 trace**，实测 14 个 span：
+
+```
+run                                         run_id=8d862948
+  node.analyze          attempt=1
+    tool.list_files     risk=read  ok=True
+  node.plan             attempt=1
+    tool.read_file      risk=read  ok=True      ← gather 出去的并发调用
+    tool.search_code    risk=read  ok=True         自动挂在同一个父节点下
+  node.execute          attempt=1  files_changed=1
+    tool.write_file     risk=write ok=True
+  …
+```
+
+四个埋点位置，各自只有一处：
+
+| span | 埋在哪 | 为什么是这里 |
+|---|---|---|
+| `run` | `worker/runner.py` | 一次 run 一条 trace 的根 |
+| `node.*` | **`agent/graph.py` 的装配处** | 一行包住 6 个节点＝AOP 环绕通知，节点方法保持纯粹 |
+| `tool.*` | `ToolRegistry.call` | 一处包住 6 个工具，和超时/并发上限同一个位置 |
+| `llm.structured` | `AnthropicLLM` | 带 token 属性，让「慢」和「贵」在同一条链路上对得上号 |
+
+四个必须说对的点：
+
+- **没有一处 `if enabled:`。** OTel 的 api 和 sdk 是两个包：没装配 provider 时
+  `get_tracer()` 返回 no-op 实现，埋点零成本。开关只在 `setup_tracing()` 一处。
+  （**Java 对照**：SLF4J API 没绑定实现时日志静默丢弃，调用方不写 `if (logger != null)`。）
+- ★**吞异常的地方必须手动标错。** `ToolRegistry.call` 把异常吃成 `ok=False` 的
+  返回值（故意的，一个坏工具不能杀掉整个 run），于是没有异常冒到 OTel 面前——
+  不补 `mark_error()` 的话，**一条全是失败的链路在 trace 里是全绿的**。
+- **ConsoleSpanExporter 官方默认写 stdout，这里改成 stderr。** stdio 下 stdout 是
+  MCP 的协议通道，吐一坨 span JSON 等于发畸形报文。危险的默认值在库这层就修掉。
+- **父子关系不用手工传。** `start_as_current_span` 写进 ContextVar，
+  `asyncio.gather` 创建 Task 时会**拷贝**一份上下文——这就是 `plan` 那一把并发
+  工具调用能整整齐齐挂在一个节点 span 底下的原因。Java 那边得手动做跨线程传播。
+
+`publish` / `git.*` / `github.pull_request` 是**另一条 trace**：中间隔着人工审批，
+可能几小时后、另一个进程。两条靠 `run_id` 属性关联——这也是 `run_id` 值得冗余
+写进**每个** span 而不是只写根节点的原因（后端按属性检索是 per-span 的）。
+`git.*` 的 span 属性里**只有子命令名**：`git push` 的参数带着 remote URL，
+URL 的 userinfo 里塞着 PAT，而 span 属性是明文且会被导出到别人家。
+
 ## 评测基准集
 
 `benchmarks/cases/` 18 个 case，`make bench` 出报表。
@@ -258,7 +311,7 @@ src/repopilot/
   workspace/      仓库副本、路径收敛
   sandbox/        带硬超时的进程执行
   llm/            供应商适配、结构化输出（强制 tool use）
-  observability/  日志装配 + ContextVar 携带 run_id
+  observability/  日志装配 + ContextVar 携带 run_id + OpenTelemetry 埋点
   github/         webhook 验签、事件解析、REST 客户端（PAT）
   publishing/     Publisher 协议 + 开 PR / 回写评论 + 无 token 时空转
   evaluation/     轨迹指标、评测基准集与判分
@@ -278,8 +331,8 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 **已完成**：Agent 闭环（LangGraph 六节点 + 重试条件边）、6 个工具、三层隔离、
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
-18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本。
-**244 passed / 2 skipped，ruff 全绿。**
+18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
+OpenTelemetry 链路追踪。**257 passed / 2 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 
@@ -295,4 +348,6 @@ SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR →
   没打过真实 GitHub API。
 - webhook 的「登记投递」和「入队 run」不在同一个事务里。
 - 事件总线是进程内的，拆多进程需换 Redis pub/sub 或 PG `LISTEN/NOTIFY`。
-- API 没有鉴权。OpenTelemetry 没接。
+- **trace 只导到控制台**，没接 OTLP / Jaeger；用的是同步的 `SimpleSpanProcessor`，
+  长期开着会拖慢主流程。HTTP 入口和数据库调用还没埋点，只有 trace 没有 metrics。
+- API 没有鉴权。

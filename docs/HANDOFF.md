@@ -26,7 +26,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 **定位**：把 Coding Agent 接进真实研发流程的后端服务。不是「能改代码的脚本」，
 是「Issue → Run → 审批 → PR」这条业务链路。
 
-**当前状态：244 passed / 2 skipped，ruff 全绿，master 干净。**
+**当前状态：257 passed / 2 skipped，ruff 全绿，master 干净。**
 
 先读这三份，不要凭猜：
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
@@ -48,15 +48,25 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
   外加 3 个 prompt 注入攻击样本），
   隐藏测试判分、`false_success` 单独统计、评测集自检
 - **MCP server**：手写 JSON-RPC 2.0（不引 SDK），stdio 暴露 6 个工具
+- **Prompt 注入防护**：`fence_task()` 分隔符 + 来源标注 + 长度上限 + 审计日志，
+  三个可判分的攻击样本（其中一个**故意防不住**，用来钉死防御边界）
+- **Token 计量与成本**：唯一 LLM 出口一处插桩，成本进评测报表
+- **OpenTelemetry**：四层 span，埋点全在"一处包住 N 个"的位置
 
 ---
 
-# 接下来要做的三件事（按顺序）
+# ✅ 三件事已全部完成（2026-09-10）
 
 这三件是对着**国内 Agent 工程岗位要求**筛出来的：「权限边界 / Prompt 注入防护」
-「成本控制」「可观测」都是明确高频词，而这个项目恰好缺这三样。
+「成本控制」「可观测」都是明确高频词，而这个项目当时恰好缺这三样。
+
+**三个都已落地**，下面的原始需求保留作为存档，落点见每节开头的一行小结。
+下一步要做什么看 `docs/progress.md` 的 NEXT。
 
 ## 任务 1（最高优先）：Prompt 注入防护 —— 半天
+
+> ✅ **已完成**：`agent/prompts.py::fence_task` + `tools/base.py` 审计日志 +
+> `benchmarks/cases/injection-*` 三个 case + `tests/test_prompt_injection.py`（先红后绿）。
 
 **这不是硬贴的功能，是项目里一个真实存在的漏洞。已核对代码确认：**
 
@@ -92,6 +102,10 @@ api/routes.py::github_webhook
 
 ## 任务 2：Token 计量与成本控制 —— 1~2 小时
 
+> ✅ **已完成**：`llm/usage.py` + `config.py::model_prices` + `RunEvaluation.usage`
+> + `bench.py` 成本段。**prompt caching 算完决定不开**（前缀不共享 + 低于 2048 下限），
+> 理由写在 `llm/anthropic_client.py` 的模块头注释里。
+
 现在 `src/repopilot/llm/` 里**一处 `usage` 都没有**，完全不知道一个 run 花了多少钱。
 
 **已核对：唯一的 LLM 出口是 `LLMClient.structured()`**，插桩点只有一个：
@@ -114,6 +128,11 @@ api/routes.py::github_webhook
 `_SCHEMA_MARKER`（测试库会自愈重建），**开发库要手动 `make db-reset`**。
 
 ## 任务 3：OpenTelemetry 可观测 —— 半天
+
+> ✅ **已完成**：`observability/tracing.py`，四层 span（`run` / `node.*` / `tool.*` /
+> `llm.structured`）+ 发布链路另一条 trace。节点埋点落在 **`agent/graph.py` 的装配处**
+> 而不是 `nodes.py` 的六个方法上 —— 和工具"一处包住 6 个"同一个思路。
+> `make trace` 看效果，`tests/test_tracing.py` 13 条。
 
 「可观测」是 Agent 工程岗明确点名的关键词，现在只有日志没有 trace。
 
@@ -173,10 +192,11 @@ pytest 有 `pythonpath=["src"]` 兜底，但 **uvicorn 和 scripts/ 下的脚本
 
 ```
 make sync / db-up / db-reset / psql
-make test (244 passed / 2 skipped) / test-fast / test-nodb
+make test (257 passed / 2 skipped) / test-fast / test-nodb
 make demo / run(:8000, /docs)
 make bench (需 ANTHROPIC_API_KEY) / bench-check (不花钱)
 make mcp / mcp-smoke
+make trace (开着 OTel 跑一次 demo，span 打到 stderr)
 ```
 
 测试不联网不花 token（conftest 强制 scripted provider）。

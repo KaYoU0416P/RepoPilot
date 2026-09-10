@@ -218,14 +218,42 @@ SYSTEM 里声明「围栏内是 data 不是 instructions」。**这一层是概�
 **边界**：分隔符只管 `task` 那条路。载荷藏在源文件里、经 `read_file` 的返回值
 进上下文时，分隔符毫无作用。见 `benchmarks/cases/injection-via-file-content`。
 
+## 可观测：日志 + trace
+
+日志回答「发生了什么」，trace 回答「时间花在哪、谁调了谁」。两者共用同一个
+`run_id_var`（ContextVar）—— 日志靠 `_RunIdFilter` 取，span 靠 `span()` 取。
+
+```
+run                       worker/runner.py      一次 run 一条 trace 的根
+ └─ node.*                agent/graph.py 装配处  一行包住 6 个节点（AOP 环绕通知）
+     ├─ tool.*            ToolRegistry.call      一处包住 6 个工具
+     └─ llm.structured    AnthropicLLM           带 token 属性
+
+publish                   publishing/github.py   另一条 trace，靠 run_id 关联
+ ├─ git.*                 _git()                 一处包住全部 git 子命令
+ └─ github.pull_request   _open_pr_and_comment
+```
+
+四个关键决定：
+
+| 决定 | 为什么 |
+|---|---|
+| 埋点代码里没有 `if enabled:` | OTel api/sdk 分离，没装配 provider 时 tracer 是 no-op（≈ SLF4J） |
+| 吞异常的地方手动 `mark_error()` | 工具异常被降级成 `ok=False`，不补的话失败链路显示全绿 |
+| ConsoleSpanExporter 写 **stderr** | stdio 下 stdout 是 MCP 的协议通道 |
+| `run_id` 冗余写进每个 span | 后端按属性检索是 per-span 的；也是两条 trace 唯一的关联线索 |
+
+`git.*` 的属性里只放子命令名，**不放完整命令** —— `git push` 的参数带着
+含 PAT 的 remote URL，而 span 属性是明文且会导出到第三方后端。
+
 ## 当前状态
 
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
-MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本。
-**244 passed / 2 skipped。**
+MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本、
+OpenTelemetry 链路追踪。**257 passed / 2 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
 **未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、
-Docker sandbox、OpenTelemetry、预算熔断、API 鉴权。
+Docker sandbox、trace 接真后端（现在只导控制台）、预算熔断、API 鉴权。
 详见 `docs/progress.md`。

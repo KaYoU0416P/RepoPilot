@@ -27,7 +27,7 @@ from pathlib import Path
 
 from repopilot.config import get_settings
 from repopilot.mcp import MCPServer
-from repopilot.observability import setup_logging
+from repopilot.observability import setup_logging, setup_tracing
 from repopilot.tools import build_registry
 from repopilot.workspace import WorkspaceManager
 
@@ -66,6 +66,13 @@ async def main() -> int:
     setup_logging(stream=sys.stderr)
 
     settings = get_settings()
+    # 同理，span 也只能往 stderr 吐。`setup_tracing` 的默认值就是 stderr，
+    # 这里显式再写一遍：这是**协议正确性**，不该依赖别处的默认值不被改掉。
+    setup_tracing(
+        enabled=settings.otel_enabled,
+        service_name=settings.otel_service_name,
+        stream=sys.stderr,
+    )
     repo = (args.repo or settings.sample_repo).expanduser().resolve()
     if not repo.is_dir():
         print(f"仓库不存在: {repo}", file=sys.stderr)

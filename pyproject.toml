@@ -12,6 +12,7 @@ dependencies = [
     "anthropic>=0.40",
     "httpx>=0.27",
     "asyncpg>=0.31.0",
+    "opentelemetry-sdk>=1.29",
 ]
 
 [dependency-groups]
