@@ -14,6 +14,15 @@ def build_llm() -> LLMClient:
             model=settings.model,
             max_tokens=settings.max_tokens,
         )
+    if settings.llm_provider == "deepseek":
+        from repopilot.llm.deepseek_client import DeepSeekLLM
+
+        return DeepSeekLLM(
+            api_key=settings.deepseek_api_key,
+            model=settings.model,
+            max_tokens=settings.max_tokens,
+            base_url=settings.deepseek_base_url,
+        )
     return ScriptedLLM()
 
 

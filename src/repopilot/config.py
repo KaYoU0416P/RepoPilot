@@ -34,9 +34,13 @@ class Settings(BaseSettings):
     )
 
     # --- LLM ---
-    llm_provider: Literal["anthropic", "scripted"] = "anthropic"
+    llm_provider: Literal["anthropic", "deepseek", "scripted"] = "anthropic"
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""
+    deepseek_api_key: str = ""
+    #: 默认走 beta 通道：`strict`（保证 tool_call 参数符合 JSON Schema）只在那里有。
+    #: 换成 Qwen / Kimi / GLM 的兼容端点也是改这一项。
+    deepseek_base_url: str = "https://api.deepseek.com/beta"
     max_tokens: int = 4096
 
     #: 模型单价表。**查不到的模型返回的成本是 `None` 而不是 0** ——
@@ -47,6 +51,29 @@ class Settings(BaseSettings):
         "claude-opus-4-7": ModelPricing(input_per_mtok=5.00, output_per_mtok=25.00),
         "claude-opus-4-6": ModelPricing(input_per_mtok=5.00, output_per_mtok=25.00),
         "claude-haiku-4-5": ModelPricing(input_per_mtok=1.00, output_per_mtok=5.00),
+        # DeepSeek，**谷时价**（见下方 ⚠️）。缓存是自动的、不收写入费，
+        # 所以 `cache_write_multiplier=0`：`cache_creation_input_tokens` 恒为 0，
+        # 这一项在成本公式里自然消失。
+        # cache_read 倍率由官方公布的命中价反推：0.022/0.66、0.007/0.22。
+        #
+        # ⚠️ **DeepSeek 是峰谷定价，峰时段单价翻倍**（UTC 01:00–04:00 与
+        #    06:00–10:00 的工作日 ≈ 北京时间 09:00–12:00 / 14:00–18:00）。
+        #    `ModelPricing` 是平价表，表达不了随时钟变的单价 —— 要做对得在
+        #    **记账那一刻**钉住单价，而不是在 `estimate_cost` 那一刻算，
+        #    否则纯函数就变成了依赖时钟的函数。这里按谷价记，
+        #    白天跑出来的成本会被**低估最多一半**。见 progress.md 已知缺口。
+        "deepseek-v4-pro": ModelPricing(
+            input_per_mtok=0.66,
+            output_per_mtok=1.98,
+            cache_write_multiplier=0.0,
+            cache_read_multiplier=0.0333,
+        ),
+        "deepseek-v4-flash": ModelPricing(
+            input_per_mtok=0.22,
+            output_per_mtok=0.66,
+            cache_write_multiplier=0.0,
+            cache_read_multiplier=0.0318,
+        ),
     }
 
     def pricing_for(self, model: str) -> ModelPricing | None:
@@ -107,14 +134,42 @@ class Settings(BaseSettings):
     publish_timeout_seconds: float = 120.0
 
 
+#: 每个 provider 的默认模型。**只在用户没显式设 `REPOPILOT_MODEL` 时生效** ——
+#: 否则「换了 provider 忘了换 model」会把 `claude-sonnet-4-6` 发给 DeepSeek，
+#: 换回来一个看不懂的 400。
+DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-6",
+    "deepseek": "deepseek-v4-pro",
+}
+
+#: provider → (设置里的 key 字段, 裸环境变量名)。
+#: 裸环境变量是给「照着官方文档 export 了一下」的人兜底的，
+#: 官方文档不会教你写 `REPOPILOT_` 前缀。
+_PROVIDER_KEYS = {
+    "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+    "deepseek": ("deepseek_api_key", "DEEPSEEK_API_KEY"),
+}
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Cached so the whole process shares one Settings instance."""
     import os
 
     s = Settings()
-    if not s.anthropic_api_key:
-        s.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if s.llm_provider == "anthropic" and not s.anthropic_api_key:
+    for field, env_var in _PROVIDER_KEYS.values():
+        if not getattr(s, field):
+            setattr(s, field, os.environ.get(env_var, ""))
+
+    # 没设过 model 就跟着 provider 走。`model_fields_set` 是 pydantic 记录的
+    # 「这个字段是被显式赋过值，还是在吃默认值」—— 用它才能区分
+    # 「用户就是要 claude-sonnet-4-6」和「用户压根没管」。
+    if "model" not in s.model_fields_set:
+        s.model = DEFAULT_MODELS.get(s.llm_provider, s.model)
+
+    # 选了某个 provider 却没有它的 key → 降级成 scripted。
+    # 不抛异常是刻意的：跑测试和 demo 的人不该被迫先去申请 key。
+    entry = _PROVIDER_KEYS.get(s.llm_provider)
+    if entry is not None and not getattr(s, entry[0]):
         s.llm_provider = "scripted"
     return s

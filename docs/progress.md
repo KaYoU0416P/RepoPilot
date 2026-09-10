@@ -34,6 +34,38 @@
 
 ## NOW
 
+### Stage D 第四步 — DeepSeek provider（276 passed / 2 skipped，ruff 全绿）
+
+**动机是成本**：18 个 case 跑 Anthropic 要几美元，跑 DeepSeek 是几毛。
+但顺带拿到一个更值钱的东西 —— **同一套基准集横评两个模型**，
+产出「成功率 vs. 每修对一个多少钱」的性价比对比。
+「我用了最强模型」谁都会说，「我有数据支撑的成本-质量权衡」才是评测能力。
+
+- `llm/deepseek_client.py`：**新增一个类 + `build_llm()` 一个分支**，
+  图 / 节点 / 工具 / 评测 / trace **一行没动**。这是 `LLMClient` 收敛成
+  单方法协议的第三次兑现（前两次是加计量、加 span）。
+- **手写 httpx，不引 `openai` SDK**：只用一个端点、一种用法，
+  和不引 PyGithub、不引 MCP SDK 是同一个判断。（这次还有个现实原因：
+  PyPI 连续三次 TLS 握手失败，而 httpx 本来就在依赖里。）
+- **`base_url` 是构造参数不是常量**：OpenAI 兼容层是国产模型的事实标准，
+  换个 base_url + model 就能接 Qwen / Kimi / GLM。
+- 默认走 **`/beta` 通道**，因为 `strict`（保证 tool_call 参数符合 JSON Schema）
+  只在那里有。不开 strict 的话 arguments 只是「尽量」符合 —— **Anthropic 那边
+  强制 tool use 天然就是服务端校验，这里要显式换来。**
+- ★**唯一会真正算错钱的地方**：`prompt_tokens` 是**输入总量**（命中 + 未命中），
+  而我们的 `input_tokens` 只装未命中那部分。直接映射会把命中的那部分
+  **计两遍**。所以取 `prompt_cache_miss_tokens`，有专门的测试钉这一条。
+- **DeepSeek 缓存是自动的，不用发 `cache_control`** → `cache_hit_rate`
+  这个当初为「验证缓存有没有生效」埋的指标，到这里才第一次会有非零值。
+  `anthropic_client.py` 里「算完决定不开 caching」的结论**只对 Anthropic 成立**。
+- `DEFAULT_MODELS`：没显式设 `REPOPILOT_MODEL` 时模型跟着 provider 走。
+  用 pydantic 的 `model_fields_set` 区分「用户就是要这个」和「用户压根没管」——
+  否则「换了 provider 忘了换 model」会把 `claude-sonnet-4-6` 发给 DeepSeek。
+- 测试切在 `httpx.MockTransport` 上（和 `test_publishing.py` 一致）：
+  HTTP 那层是假的，**解析 / 映射 / 计量全是真的跑了一遍**。19 条，不联网不花钱。
+
+**还没跑过真实 key** —— 下一步就是这个。
+
 ### Stage D 第三步 — OpenTelemetry 链路追踪（257 passed / 2 skipped，ruff 全绿）
 
 日志回答「发生了什么」，trace 回答「时间花在哪、谁调了谁」。
@@ -279,4 +311,14 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
 - **只有 trace，没有 metrics**。成功率 / 成本这些聚合值还是评测报表自己算的，
   没走 OTel Metrics API，也就没有 Prometheus 那种时序视图。
 - 数据库调用（asyncpg）没埋点，慢查询在 trace 里是一段空白。
+- ⚠️ **DeepSeek 是峰谷定价，峰时段单价翻倍**（UTC 01:00–04:00 / 06:00–10:00 工作日
+  ≈ 北京时间 09:00–12:00 / 14:00–18:00），而 `ModelPricing` 是平价表，按谷价记。
+  **白天跑出来的成本会被低估最多一半。** 要做对得在**记账那一刻**钉住单价，
+  而不是在 `estimate_cost` 那一刻算 —— 否则纯函数就变成依赖时钟的函数，
+  可测试性直接退步。这是「estimate 不是账单」最具体的一个例证。
+- **DeepSeek 的 `strict` 是 beta 功能**，走的是 `/beta` 端点。它要是有变动或者
+  行为不稳，`structured()` 会退化成「客户端校验 + 重试」，而重试是花钱的。
+  客户端的 pydantic 校验没有省掉，就是为了这个。
+- **`DeepSeekLLM` 还没跑过真实 key**，只用 `MockTransport` 验证过协议形状。
+  真实模型的 schema 遵循度、`max_tokens=4096` 对整文件重写够不够用，都还没验证。
 - 评测不给"改动幅度"打分：重写整个文件和一行改对，现在得分一样。

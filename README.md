@@ -35,15 +35,16 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 257 passed / 2 skipped
+make test          # 276 passed / 2 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
 make bench-check   # 体检评测基准集（不调 LLM、不花钱）
 ```
 
-不需要 API key。没有 `ANTHROPIC_API_KEY` 时自动降级到 `ScriptedLLM`
-（确定性测试替身，只认识内置样例仓库）。配 `.env` 后走真实模型。
+不需要 API key。选中的 provider 没有对应的 key 时自动降级到 `ScriptedLLM`
+（确定性测试替身，只认识内置样例仓库）。配 `.env` 后走真实模型 ——
+支持 **Anthropic** 和 **DeepSeek**（便宜一个数量级），见 `.env.example`。
 
 ### 跑一次完整业务链路
 
@@ -159,6 +160,33 @@ SYSTEM 只有 959 字符 ≈ 240 token。**低于下限不报错，只是静默�
 而写缓存按 1.25 倍计费。所以先量再说：`cache_read_input_tokens` 已经接进报表，
 它长期是 0 就说明缓存没生效。
 
+### 换一个模型供应商 = 加一个类
+
+`LLMClient` 只有 `structured()` 一个方法，所以**整个系统调模型的出口只有一处**。
+接 DeepSeek 就是新增一个 `DeepSeekLLM` + `build_llm()` 加一个分支——
+图、节点、工具、评测、trace 一行都没动。
+
+| | Anthropic | DeepSeek |
+|---|---|---|
+| 强制结构化输出 | `tool_choice` 指定工具名 | 同样能强制，但字段形状不同 |
+| 服务端校验 schema | 强制 tool use 天然就是 | 要 `"strict": true` **且走 `/beta`** |
+| `arguments` 类型 | `block.input` 是 **dict** | 是 **JSON 字符串**，得再 `loads` 一次 |
+| prompt 缓存 | 要发 `cache_control`（本项目算完不开） | **自动生效**，不收写入费 |
+| 输入 token 字段 | `input_tokens` = 未命中部分 | `prompt_tokens` = **总量**，别直接映射 |
+
+最后一行是这次唯一真正会算错钱的地方：`prompt_tokens` 是命中 + 未命中的**总和**，
+直接当成我们的 `input_tokens` 会把命中的那部分**计两遍**。所以取
+`prompt_cache_miss_tokens`。有测试专门钉这一条。
+
+`DeepSeekLLM` 不止能接 DeepSeek——OpenAI 兼容层是国产模型的事实标准，
+换个 `base_url` + `model` 就能接 Qwen / Kimi / GLM，所以 `base_url` 是构造参数。
+**同样没引 SDK**，和手写 JSON-RPC、手写 GitHub REST 是同一个判断。
+
+> ⚠️ **DeepSeek 是峰谷定价，峰时段单价翻倍**（≈ 北京时间 09:00–12:00 / 14:00–18:00）。
+> `ModelPricing` 是平价表，按谷价记——**白天跑出来的成本会被低估最多一半**。
+> 要做对得在**记账那一刻**钉住单价，而不是在 `estimate_cost` 那一刻算，
+> 否则纯函数就变成依赖时钟的函数。这正是 `estimate_cost` 叫 estimate 的原因。
+
 ### 链路追踪（OpenTelemetry）
 
 日志回答「发生了什么」，trace 回答「时间花在哪、谁调了谁」。
@@ -190,7 +218,7 @@ run                                         run_id=8d862948
 | `run` | `worker/runner.py` | 一次 run 一条 trace 的根 |
 | `node.*` | **`agent/graph.py` 的装配处** | 一行包住 6 个节点＝AOP 环绕通知，节点方法保持纯粹 |
 | `tool.*` | `ToolRegistry.call` | 一处包住 6 个工具，和超时/并发上限同一个位置 |
-| `llm.structured` | `AnthropicLLM` | 带 token 属性，让「慢」和「贵」在同一条链路上对得上号 |
+| `llm.structured` | `AnthropicLLM` / `DeepSeekLLM` | 带 token 属性，让「慢」和「贵」在同一条链路上对得上号 |
 
 四个必须说对的点：
 
@@ -310,7 +338,7 @@ src/repopilot/
   tools/          工具契约与注册表（超时 + 并发上限 + 异常降级）
   workspace/      仓库副本、路径收敛
   sandbox/        带硬超时的进程执行
-  llm/            供应商适配、结构化输出（强制 tool use）
+  llm/            供应商适配（Anthropic / DeepSeek）、结构化输出、用量计量
   observability/  日志装配 + ContextVar 携带 run_id + OpenTelemetry 埋点
   github/         webhook 验签、事件解析、REST 客户端（PAT）
   publishing/     Publisher 协议 + 开 PR / 回写评论 + 无 token 时空转
@@ -332,7 +360,7 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
 18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**257 passed / 2 skipped，ruff 全绿。**
+OpenTelemetry 链路追踪。**276 passed / 2 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 

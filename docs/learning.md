@@ -851,3 +851,93 @@ run_id 就没法直接查"这个 run 的所有慢工具"。
 
 一个坑：**全局 TracerProvider 一个进程只能装一次**，重复 `set_tracer_provider`
 会被拒绝并打警告。所以在 import 时装一次，用 fixture 在每个用例前 `clear()`。
+
+## 换一个模型供应商：单方法协议的第三次兑现
+
+接 DeepSeek 只改了两个地方：新增 `llm/deepseek_client.py`，`build_llm()` 加一个分支。
+**图、节点、工具、评测、trace 一行都没动。**
+
+前两次兑现是「加计量」和「加 span」。三次都是同一个原因：
+`LLMClient` 只有 `structured()` **一个方法**，所以整个系统调模型的出口只有一处。
+
+> **通用结论**：抽象的价值不在"看起来解耦"，在**你能指着一个地方说"改这里就够了"**。
+> 一个方法的协议听起来简陋，但它让「加计量 / 加追踪 / 加限流 / 换供应商」
+> 全部退化成一处的事。**Java 对照**：接口越窄，实现越好换 —— 这就是 ISP。
+
+### OpenAI 兼容协议 vs Anthropic 协议：四处真实差异
+
+不是"改个 URL 就行"。逐条对：
+
+| | Anthropic | DeepSeek（OpenAI 兼容） |
+|---|---|---|
+| system 提示 | 独立的 `system` 参数 | `messages` 里 role=system 的一条 |
+| 强制工具 | `{"type":"tool","name":X}` | `{"type":"function","function":{"name":X}}` |
+| 返回的参数 | `block.input` 是 **dict** | `arguments` 是 **JSON 字符串** |
+| schema 保证 | 强制 tool use 天然是服务端校验 | 要 `"strict": true` **且走 `/beta`** |
+
+第三条最容易踩：忘了 `json.loads` 会得到一个很难看懂的 pydantic 报错
+（「期望 object，得到 str」），而且它长得像模型犯的错，其实是你解析错了。
+
+第四条要想清楚：**Anthropic 的强制 tool use 天然就是服务端校验 schema，
+DeepSeek 这边要显式换来。** 不开 `strict`，arguments 只是"尽量"符合 ——
+客户端的 pydantic 校验一条都不能省，而校验失败意味着重试，重试是花钱的。
+
+### ★把别人的 usage 字段映射到自己的桶，不是逐字段改名
+
+这次唯一会真正**算错钱**的地方：
+
+```
+prompt_tokens            = 命中 + 未命中的**总量**
+prompt_cache_hit_tokens  = 命中部分
+prompt_cache_miss_tokens = 未命中部分
+```
+
+而我们的 `Usage.input_tokens` 语义是 Anthropic 的：**只装未命中那部分**。
+`prompt_tokens` 直接映射过去，加上 `cache_read_input_tokens`，
+命中的那部分就被**计了两遍**。
+
+> **通用结论：跨系统映射计量数据时，先问每个字段的"分母"是什么。**
+> 名字像不代表语义一样。`input_tokens` 和 `prompt_tokens` 看着是同义词，
+> 一个是子集一个是全集。有一条测试专门钉这个：
+> `test_prompt_tokens_is_not_mapped_straight_onto_input_tokens`。
+
+还有一个副产品：**DeepSeek 的缓存是自动的，不用发 `cache_control`。**
+当初在 Anthropic 那边论证「算完决定不开 prompt caching」时埋的
+`cache_hit_rate` 指标，到 DeepSeek 上第一次会有非零值 ——
+**那个结论只对 Anthropic 成立，而当初埋的观测点让这件事可以被看见而不是被假设。**
+
+### 平价表撞上时间相关定价
+
+DeepSeek 是**峰谷定价，峰时段单价翻倍**。我们的 `ModelPricing` 是平价表，
+表达不了随时钟变的单价。
+
+想清楚了再决定怎么做：要做对，得在**记账那一刻**（`_usage_of` 里）钉住单价，
+而不是在 `estimate_cost` 那一刻算 —— 因为账单是**发生时**定价的。
+但那会让 `estimate_cost` 从纯函数变成依赖时钟的函数，可测试性直接退步。
+
+选择：**按谷价记 + 把偏差写进已知缺口**。这一轮的目的是拿到评测数字，
+不是做计费系统。而且这恰好是 `estimate_cost` 叫 estimate 的最佳例证。
+
+> **通用结论**：发现精度不够时，先问「这个数字要用来做什么决策」。
+> 用来**横向比较 case** 的话，系统性偏低一半不影响排序;
+> 用来**对账**的话差一分钱都不行。别为了后者的标准去做前者的事。
+
+### 配置的默认值要跟着相关配置走
+
+「换了 provider 忘了换 model」会把 `claude-sonnet-4-6` 发给 DeepSeek，
+换回来一个看不懂的 400。
+
+解法不是硬校验（那会挡住"用 DeepSeek 的兼容端点接 Qwen"这种正当用法），
+而是：**只在用户没显式设过 `model` 时，让它跟着 provider 走。**
+
+```python
+if "model" not in s.model_fields_set:
+    s.model = DEFAULT_MODELS.get(s.llm_provider, s.model)
+```
+
+`model_fields_set` 是 pydantic 记录的「这个字段是被显式赋过值，还是在吃默认值」。
+**Java 对照**：Spring 的 `@ConditionalOnProperty` / `Environment.containsProperty()`
+—— 区分"配了个和默认值一样的值"和"压根没配"。
+
+> **要记的**：「有没有设过」和「设成了什么」是两个不同的问题。
+> 只看值的话，`model == "claude-sonnet-4-6"` 分不清这两种情况。

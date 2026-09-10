@@ -90,7 +90,7 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | `tools/` | 工具契约与注册表、超时与并发上限 | 图、LLM |
 | `workspace/` | 仓库副本、路径收敛 | 工具、Agent |
 | `sandbox/` | 带硬超时的进程执行 | 在跑什么 |
-| `llm/` | 供应商适配、结构化输出 | 工具、workspace |
+| `llm/` | 供应商适配、结构化输出、用量计量 | 工具、workspace |
 | `evaluation/` | 轨迹指标、评测基准集与判分 | HTTP、LLM、数据库 |
 
 依赖单向：`api → worker → agent → tools → {workspace, sandbox}`；
@@ -137,7 +137,23 @@ Agent 自己说成功不算数，必须有人看过 diff。
 
 ## LLM 供应商
 
-`llm/build_llm()` 返回 `AnthropicLLM`（强制 tool use 拿结构化输出）或 `ScriptedLLM`。
+`llm/build_llm()` 按 `llm_provider` 返回 `AnthropicLLM` / `DeepSeekLLM` / `ScriptedLLM`。
+三者都只实现 `structured()` 这一个方法 —— **整个系统调模型的出口只有一处**，
+所以加计量、加 span、换供应商全都是一处的事，图和节点一行不用动。
+
+| | Anthropic | DeepSeek（OpenAI 兼容） |
+|---|---|---|
+| 结构化输出 | 强制 tool use，服务端天然校验 schema | 强制 function call，要 `"strict": true` 且走 `/beta` |
+| `arguments` | `block.input` 是 dict | 是 **JSON 字符串**，得再 `loads` |
+| prompt 缓存 | 要发 `cache_control`（本项目算完不开） | **自动生效**，不收写入费 |
+| 输入 token | `input_tokens` = 未命中部分 | `prompt_tokens` = **总量**，直接映射会重复计数 |
+
+最后一行是唯一会真正算错钱的地方：取 `prompt_cache_miss_tokens` 而不是
+`prompt_tokens`，有测试钉着。`DeepSeekLLM` 的 `base_url` 是构造参数 ——
+OpenAI 兼容层是国产模型的事实标准，换个 base_url 就能接 Qwen / Kimi / GLM。
+
+⚠️ **DeepSeek 是峰谷定价，峰时段翻倍**，而 `ModelPricing` 是平价表（按谷价记）。
+要做对得在**记账那一刻**钉住单价，否则 `estimate_cost` 就从纯函数变成依赖时钟。
 
 > **`ScriptedLLM` 是确定性测试替身，不是 Agent。** 它有一张只认识内置样例仓库的
 > 硬编码规则表，存在的意义是让整个图能离线跑测试、不花 token。它「解决」的问题
@@ -251,7 +267,7 @@ publish                   publishing/github.py   另一条 trace，靠 run_id �
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
 MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**257 passed / 2 skipped。**
+OpenTelemetry 链路追踪、DeepSeek provider。**276 passed / 2 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
 **未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、
