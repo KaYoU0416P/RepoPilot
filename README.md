@@ -35,7 +35,7 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 301 passed / 2 skipped
+make test          # 302 passed / 2 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
@@ -144,14 +144,17 @@ push 重复是 no-op，开 PR 前先查同 head 的 PR——崩在任何一步�
 - **成本的分母是「修对的数量」，不是总数。** 失败也烧钱，那部分要摊到成功上，
   否则「全部失败但很便宜」的 Agent 会显得性价比最高。
 
-`make bench` 的成本段（数字是**造的样例**，还没跑过真实 LLM）：
+真实数据（DeepSeek-v4-pro，18 个 case × 3 轮 = 54 次 run）：
 
 ```
-  总花费                  $0.2760
-  ★ 平均修对一个           $0.0920   （失败烧的钱也摊在这里）
-  平均 LLM 调用           4.0 次 / case   平均 21,291 token
-  失败 case 多烧           +121% token（对比成功 case）
+  总花费                  $0.3768
+  ★ 平均修对一个           $0.0090   （失败烧的钱也摊在这里）
+  平均 LLM 调用           3.3 次 / case   平均 6,343 token
+  失败 case 多烧           +89% token（对比成功 case）
 ```
+
+**「失败更贵」这条以前是直觉，现在是数据**：失败的 run 平均比成功的多烧 89%
+token —— 它们把重试预算耗光了，却什么都没换回来。
 
 **prompt caching 算完决定不开。** 缓存是前缀匹配，渲染顺序是
 `tools → system → messages`，而三个节点的 `tools`（JSON Schema）各不相同 →
@@ -159,6 +162,11 @@ push 重复是 no-op，开 PR 前先查同 head 的 PR——崩在任何一步�
 SYSTEM 只有 959 字符 ≈ 240 token。**低于下限不报错，只是静默不缓存**，
 而写缓存按 1.25 倍计费。所以先量再说：`cache_read_input_tokens` 已经接进报表，
 它长期是 0 就说明缓存没生效。
+
+**这个埋点后来真的派上用场了**：DeepSeek 的缓存是自动的（不用发 `cache_control`），
+同一份报表在它上面测到 **73% 的输入 token 是缓存命中**（54 次 run，16.9 万输入
+token 里 12.4 万命中）。**「不开缓存」这个结论只对 Anthropic 成立** ——
+当初埋的观测点让这件事可以被看见，而不是被假设。
 
 ### 换一个模型供应商 = 加一个类
 
@@ -305,6 +313,44 @@ uv run python scripts/bench.py --repeat 3    # 每个 case 跑 3 轮
 > 按轮跑而不是每个 case 连跑 3 次：每一轮是完整可比的单位（中途挂了也有完整
 > 的几轮），而且把时段影响摊平——服务端负载会漂，DeepSeek 还有峰谷时段。
 
+### 真实结果（DeepSeek-v4-pro，18 case × 3 轮）
+
+```
+  ✓ 稳定做对   13/18        ~ 不稳定  2/18        ✗ 稳定做错  3/18
+
+  平均成功率    78%   各轮对了 15、13、14
+  ★可靠成功率   72%   （每一轮都对才算）
+  乐观成功率    83%   （至少一轮对就算）
+  ★两者之差 11% 全是随机性
+```
+
+| 类别 | 3 轮合计 | |
+|---|---|---|
+| `needs_dependency` | 6/6 | |
+| `needs_test_change` | 6/6 | |
+| **`prompt_injection`** | **9/9** | 三个攻击样本每轮都没被劫持 |
+| `single_file` | 12/15 | |
+| `cross_file` | 8/12 | |
+| **`unsolvable`** | **1/6** | ★最差的一档，见下 |
+
+**★ 最重要的数字不是 78%，是 `false_success = 9/54（17%）** —— Agent 说修好了，
+隐藏测试说没有。而且**它不是抖动，是稳定复现的**：
+
+```
+cross-file-constant      false_success × 3/3
+none-guard               false_success × 3/3
+```
+
+这两个 case 上，Agent **每一轮都自信地报告成功**。接进真实流程就是：
+**约 1/6 的 PR 会带着「我修好了」推到审批闸门前，而实际是错的。**
+这就是 `running` 不能直达 `published` 的全部理由——不是流程洁癖，是有数据的。
+
+**`unsolvable` 只有 1/6**，而且失败形态是 `false_success` 和 `crashed`，
+不是老老实实放弃。**这个 Agent 不知道自己不知道**——比修不好严重得多。
+两次 `crashed` 都是在无解题上把 16,384 个输出 token 全烧在思考上，
+产出为零：`max_tokens` 是单次上限，拦不住一个 run 反复烧，
+**真正缺的是按累计成本熔断**。
+
 ## Prompt 注入防护
 
 项目主线是**不信任模型的输出**（沙箱、路径收敛、隐藏测试判分、人类审批）。
@@ -395,13 +441,18 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
 18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**301 passed / 2 skipped，ruff 全绿。**
+OpenTelemetry 链路追踪。**302 passed / 2 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 
-- **评测基准集还没跑过真实 LLM**，只用 ScriptedLLM 验证过 harness 通。
-  报表里的数字目前没有意义。三个注入 case 同理——现在能说的是「设计了可判分的
-  靶子 + 分层防御」，**不能说「防护有效」**。
+- **只测过一个模型（DeepSeek-v4-pro）、3 轮。** 换 Claude / GPT 结论可能完全不同，
+  3 轮也只够看出"稳不稳"，不够给出置信区间。
+- **★注入 9/9 抵抗住了，但这不等于「防御有效」。** 这一轮**没法区分**
+  「`fence_task` 起了作用」和「模型本来就不上当」——要证明防御有效，得做 A/B：
+  关掉分隔符再跑一遍，看落点变不变。**没做这个对照之前，只能说「没被攻破」，
+  不能说「因为我的防御所以没被攻破」。**
+- 18 个 case 都是**小规模合成仓库**。真实项目的难点（几万行上下文、隐式约定、
+  构建系统）完全没覆盖，这是基准集的天花板。
 - **注入的提示词防御是概率性的**，不是确定性的。挡不住经工具结果进来的载荷。
 - **审计日志只在工具调用结束后记一条**，进程被 SIGKILL 打死在中间就没有记录。
 - webhook 入队时 `repo_path` 还是内置样例仓库，**没有真的 clone 目标仓库**。
