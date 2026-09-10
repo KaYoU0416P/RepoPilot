@@ -5,5 +5,5 @@ class User:
 
 
 def display_name(user: User) -> str:
-    """有昵称显示昵称（首字母大写），否则显示用户名。"""
+    """显示名一律首字母大写：昵称去空白后非空就用昵称，否则用用户名。"""
     return user.nickname.strip().title()

@@ -9,6 +9,8 @@
      会给 Agent 送分，比 Agent 表现差危险得多。
 """
 
+import sys
+
 import pytest
 
 from repopilot.config import PROJECT_ROOT
@@ -21,6 +23,7 @@ from repopilot.evaluation.bench import (
     score,
 )
 from repopilot.evaluation.harness import BenchHarness
+from repopilot.sandbox import run_command
 
 CASES_ROOT = PROJECT_ROOT / "benchmarks" / "cases"
 
@@ -395,6 +398,56 @@ async def test_hidden_tests_pass_on_the_reference_solution(case_id, settings, tm
                 (workspace.root / src.relative_to(solution)).write_bytes(src.read_bytes())
         assert await harness._run_hidden_tests(workspace, case), (
             f"{case.id}: 参考答案都过不了隐藏测试，是隐藏测试写错了"
+        )
+    finally:
+        harness.workspaces.cleanup(workspace)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("case_id", sorted(EXPECTED_IDS))
+async def test_reference_solution_also_passes_the_visible_tests(case_id, settings, tmp_path):
+    """★参考答案必须**同时**过隐藏测试和可见测试。
+
+    这条自检是补上去的，而它本来就该抓到两个坏 case ——
+    真实评测里 `cross-file-constant` 连着 3 轮 `false_success`，查下去才发现
+    根因不在 Agent：
+
+      * `cross-file-constant` 的可见测试写死 `order_total(200) == 210.0`，
+        而 210 正是**错误税率**算出来的。**可见测试把 bug 钉死了。**
+      * `aware-datetime` 的可见测试传了个 naive datetime，而 docstring 明说
+        参数带时区 —— 正确的修法反而抛 TypeError。
+
+    两个 case 的病是同一个：**可见测试和正确答案互斥**。而 Agent 的 `evaluate`
+    节点要求可见测试通过才算成功，于是它**修对了反而被自己的测试判失败**，
+    只能退回那个能让可见测试变绿的错误实现 —— 然后自称成功。
+
+    > 这类 case 测的不是 Agent 的能力，是它愿不愿意迁就一个错的测试。
+    > 而那正好是 `needs_test_change` 那一档专门要考的东西，不该混进别的档。
+
+    老的自检只跑隐藏测试，所以完全看不见这个矛盾。**评测集自己也要被评测，
+    而"被评测"的覆盖面同样会有洞。**
+    """
+    case = load_cases(CASES_ROOT, only=[case_id])[0]
+    if case.expected == "give_up":
+        pytest.skip("无解 case 没有参考答案")
+
+    solution = case.directory / "solution"
+    harness = BenchHarness(settings, workspace_root=tmp_path)
+    workspace = harness.workspaces.create(case.repo_dir, run_id=f"visible-{case.id}")
+    try:
+        for src in solution.rglob("*"):
+            if src.is_file():
+                (workspace.root / src.relative_to(solution)).write_bytes(src.read_bytes())
+
+        result = await run_command(
+            [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider"],
+            cwd=workspace.root,
+            timeout=settings.test_timeout_seconds,
+            env={"PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        assert result.exit_code == 0, (
+            f"{case.id}: 参考答案过不了**可见**测试 —— 可见测试和正确答案互斥，"
+            f"Agent 修对了会被自己的测试判失败。\n{result.stdout[-800:]}"
         )
     finally:
         harness.workspaces.cleanup(workspace)
