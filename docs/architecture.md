@@ -232,6 +232,10 @@ BenchHarness.run_case          evaluation/harness.py
 
 按轮跑而不是按 case 连跑：每轮是完整可比的单位，且把时段影响摊平。
 
+实测（DeepSeek-v4-pro，18×3）：**可靠成功率 89%**、平均修对一个 **$0.0080**、
+`false_success` 3/54。注入防护另做过 A/B 对照（`scripts/ab_injection.py`）：
+关掉防御后载荷落地 **0/9 → 4/9**，这才叫"防御被证明有效"。
+
 ## 不可信输入：Prompt 注入
 
 `{task}` 来自 GitHub Issue 的标题 + 正文，是完全不可信的外部输入。
