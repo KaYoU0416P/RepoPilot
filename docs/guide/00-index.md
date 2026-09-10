@@ -43,7 +43,7 @@
 ```bash
 make sync      # 装依赖（永远用这个，不要 uv sync，原因见 01 章 §6）
 make db-up     # 起 PostgreSQL（Docker，端口 5433）
-make test      # 跑测试，应该 225 passed
+make test      # 跑测试，应该 244 passed
 make demo      # 不起服务、不用 API key，单跑一次 Agent
 make run       # 起 API，浏览器开 http://localhost:8000/docs
 make psql      # 进数据库命令行

@@ -26,7 +26,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 **定位**：把 Coding Agent 接进真实研发流程的后端服务。不是「能改代码的脚本」，
 是「Issue → Run → 审批 → PR」这条业务链路。
 
-**当前状态：225 passed / 2 skipped，ruff 全绿，master 干净。**
+**当前状态：244 passed / 2 skipped，ruff 全绿，master 干净。**
 
 先读这三份，不要凭猜：
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
@@ -173,7 +173,7 @@ pytest 有 `pythonpath=["src"]` 兜底，但 **uvicorn 和 scripts/ 下的脚本
 
 ```
 make sync / db-up / db-reset / psql
-make test (225 passed / 2 skipped) / test-fast / test-nodb
+make test (244 passed / 2 skipped) / test-fast / test-nodb
 make demo / run(:8000, /docs)
 make bench (需 ANTHROPIC_API_KEY) / bench-check (不花钱)
 make mcp / mcp-smoke

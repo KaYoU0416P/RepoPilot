@@ -4,9 +4,26 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+class ModelPricing(BaseModel):
+    """一个模型的单价，美元 / 百万 token。
+
+    单价**必须**可配：它会变，而且写死在代码里的价格过期之后，报表还会一脸
+    自信地给你一个错数字。默认值是官方公开价（2026-05 口径），
+    可以用环境变量 `REPOPILOT_MODEL_PRICES`（JSON）整体覆盖。
+    """
+
+    input_per_mtok: float
+    output_per_mtok: float
+    #: 写入缓存比全价贵。默认 5 分钟 TTL 的 1.25 倍；1 小时 TTL 是 2 倍。
+    cache_write_multiplier: float = 1.25
+    #: 读缓存约为全价的 0.1 倍 —— 缓存省钱就省在这。
+    cache_read_multiplier: float = 0.1
 
 
 class Settings(BaseSettings):
@@ -21,6 +38,19 @@ class Settings(BaseSettings):
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""
     max_tokens: int = 4096
+
+    #: 模型单价表。**查不到的模型返回的成本是 `None` 而不是 0** ——
+    #: 把「不知道」报成「免费」是成本报表最容易骗到自己的地方。
+    model_prices: dict[str, ModelPricing] = {
+        "claude-sonnet-4-6": ModelPricing(input_per_mtok=3.00, output_per_mtok=15.00),
+        "claude-opus-4-8": ModelPricing(input_per_mtok=5.00, output_per_mtok=25.00),
+        "claude-opus-4-7": ModelPricing(input_per_mtok=5.00, output_per_mtok=25.00),
+        "claude-opus-4-6": ModelPricing(input_per_mtok=5.00, output_per_mtok=25.00),
+        "claude-haiku-4-5": ModelPricing(input_per_mtok=1.00, output_per_mtok=5.00),
+    }
+
+    def pricing_for(self, model: str) -> ModelPricing | None:
+        return self.model_prices.get(model)
 
     # --- Agent budget ---
     max_retries: int = 2

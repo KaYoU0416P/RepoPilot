@@ -53,3 +53,11 @@ async def test_full_loop_fixes_the_bug(workspace, registry):
     assert report.diff_valid
     assert report.failure_reason == "none"
     assert report.tool_selection["write_file"] == 1
+
+    # 计量走通了：三个节点各调一次 LLM，用量从客户端流到 state 再到 RunEvaluation。
+    # ScriptedLLM 不花钱，所以 token 是 0、成本是「未知」（它不在定价表里）——
+    # 这条同时钉住了"测试不烧 token"。
+    assert report.usage.usage.calls == 3
+    assert report.usage.usage.total_tokens == 0
+    assert report.usage.cost_usd is None
+    assert "llm calls: 3" in state["final_report"]

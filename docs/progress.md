@@ -34,6 +34,32 @@
 
 ## NOW
 
+### Stage D 第二步 — Token 计量与成本控制（244 passed / 2 skipped，ruff 全绿）
+
+**插桩点只有一个**：`LLMClient` 只有 `structured()` 一个方法，所以整个系统
+调模型的出口有且只有一处。加计量就是那一处加两行 —— 节点、图、评测全不用改。
+**记账在解析之前**：schema 校验失败照样是花了钱的。
+
+- `llm/usage.py`：`Usage`（值对象，`+` 累加）+ `estimate_cost` 纯函数。
+  **四个 token 字段不是两个** —— `input_tokens` 只是**没命中缓存**的那部分，
+  另外两桶是 `cache_creation` / `cache_read`，三者互斥，要看总量必须相加。
+- `config.py::model_prices`：单价可配（价格会变，写死的过期价格会一脸自信地
+  给出错数字）。**查不到的模型成本是 `None` 不是 0** —— 把未知报成免费，
+  一个模型 ID 拼错就能让整份账单看起来免费。
+- `RunEvaluation.usage`：`runner.py` 本来就把整个 `RunEvaluation` 存进
+  `runs.evaluation`（jsonb），所以**加字段即落库，零迁移、不用 db-reset**。
+- 评测报表新增成本段：总花费 / **平均修对一个多少钱** / 平均 LLM 调用 /
+  失败 case 比成功多烧百分之多少。**分母是「判对的数量」不是总数** ——
+  失败也烧钱，那部分要摊到成功上，否则「全错但便宜」的 Agent 性价比最高。
+- **per-run 累加的前提被测试钉住了**：`build_llm()` 每次新建实例，所以
+  「实例累计」==「run 累计」。`test_build_llm_returns_a_fresh_client_every_time`
+  会拦住任何给它加 `lru_cache` 的人。
+- **prompt caching 算完决定不开**：缓存是前缀匹配，渲染顺序是
+  `tools → system → messages`，而三个节点的 `tools`（JSON Schema）各不相同 →
+  没有共享前缀；就算有也不够长 —— Sonnet 4.6 最小可缓存前缀 **2048 token**，
+  SYSTEM 只有 959 字符 ≈ 240 token。**低于下限不报错，只是静默不缓存**，
+  而写缓存按 1.25 倍计费。**先量再说**：`cache_read_input_tokens` 已接进报表。
+
 ### Stage D 第一步 — Prompt 注入防护（225 passed / 2 skipped，ruff 全绿）
 
 **这不是硬贴的功能，是项目里一个真实存在过的洞**：Issue 正文
@@ -148,24 +174,21 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
 
 ## NEXT
 
-1. **Token 计量与成本控制**。现在 `llm/` 里一处 usage 都没有，不知道一个 run
-   花了多少钱。唯一出口是 `LLMClient.structured()`，插桩点只有一个。
-   这是整个项目唯一能写进简历的量化指标。
-2. **OpenTelemetry**：每个图节点、每个工具调用、发布链路各一个 span，
+1. **OpenTelemetry**：每个图节点、每个工具调用、发布链路各一个 span，
    `run_id` 当 trace 属性（`run_id_var` 这个 ContextVar 地基已经铺好）。
    导出到控制台即可。
-3. **拿真 key 跑一轮 `make bench`**，把报表数字记进 learning.md。
+2. **拿真 key 跑一轮 `make bench`**，把报表数字记进 learning.md。
    现在只用 ScriptedLLM 验证过 harness 通，**没有真实分数**；
    三个注入 case 也**没跑过真模型**，所以现在只能说「设计了防护」，
    不能说「防护有效」。
-4. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
+3. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
    内置样例仓库；发布链路本身已经能处理真实 clone（`GitHubPublisher` 就是
    `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
-5. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
-   **必须排在第 4 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
-6. **简历项目描述 + 面试 30 秒自述稿**。README 已经更新到位，但简历上那一段
+4. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
+   **必须排在第 3 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
+5. **简历项目描述 + 面试 30 秒自述稿**。README 已经更新到位，但简历上那一段
    还没写。素材全在 `docs/learning.md`。
-7. **`docs/HANDOFF.md` 已严重过期**：还写着「Stage A 完成，75 passed，3 个
+6. **`docs/HANDOFF.md` 已严重过期**：还写着「Stage A 完成，75 passed，3 个
    commit」，Stage B / C / MCP 全没有。它是给下一个 Agent 的交接提示词，
    过期的交接比没有交接更糟。
 
@@ -203,5 +226,15 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
   验签、长度上限、没有通用 shell 工具、路径收敛。面试要把这两类分开讲。
 - **审计日志只在工具调用结束后记一条**。进程被 SIGKILL 打死在执行中间就没有
   记录（超时和异常都会走到那行，不受影响）。补的话得加一条 intent 日志。
+- **成本是估算，不是账单**。`estimate_cost` 叫 estimate 是认真的：真实账单还受
+  批量折扣、不同缓存 TTL（1 小时 TTL 的写入是 2 倍不是 1.25 倍）影响。
+  报表里的数字用来横向比较 case，不能拿去对账。
+- **成本落在 `runs.evaluation`（jsonb）里，不是独立列**。加字段即落库、零迁移，
+  代价是按成本聚合要写 `(evaluation->'usage'->>'cost_usd')::numeric`，
+  能查但索引不如列。真要做成本看板，得把这个标量提升成 `numeric` 列（钱不用 float）。
+- **prompt caching 没开**，理由见上（前缀不共享 + 低于 2048 token 下限）。
+  所以现在每个 run 的输入 token 是全价。要省这笔钱得先改 prompt 的结构。
+- **没有预算熔断**。现在只是「记账」，没有「一个 run 烧超过 $X 就掐掉」。
+  `max_retries` 是次数预算不是金额预算 —— 这是成本控制真正缺的那一半。
 - 评测只跑一轮。LLM 有随机性，严谨做法是每个 case 跑 n 次取分布。
 - 评测不给"改动幅度"打分：重写整个文件和一行改对，现在得分一样。

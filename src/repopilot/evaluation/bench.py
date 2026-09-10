@@ -35,6 +35,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from repopilot.llm.usage import UsageReport
+
 #: case 的分类。每一类都在回答一个不同的问题：这个 Agent 到底缺哪种能力。
 Category = Literal[
     "single_file",  # 单文件就能修：基线，修不了说明整条链路有问题
@@ -149,6 +151,8 @@ class CaseResult(BaseModel):
     failure_reason: str = "none"
     duration_ms: int = 0
     detail: str = ""
+    #: 这个 case 烧了多少 token / 多少钱。
+    usage: UsageReport = Field(default_factory=UsageReport)
 
 
 def score(
@@ -220,6 +224,19 @@ class BenchReport(BaseModel):
     avg_retries: float
     avg_tool_calls: float
 
+    # ---- 成本 ----
+    #: 整轮评测的总花费。`None` = 定价表里没有这个模型，算不出来。
+    total_cost_usd: float | None = None
+    #: ★简历上那个数字：**平均修好一个 bug 花多少钱**。
+    #: 分母是「判对的 case 数」不是总数 —— 失败也烧钱，那部分成本要摊到成功上，
+    #: 否则一个「全部失败但很便宜」的 Agent 看起来性价比最高。
+    cost_per_correct_usd: float | None = None
+    avg_llm_calls: float = 0.0
+    avg_tokens: float = 0.0
+    #: 失败的 case 平均比成功的 case 多烧百分之多少 token。
+    #: 直觉上失败更贵（重试烧掉整个预算），但要用数据说，不要用直觉说。
+    failure_token_overhead: float | None = None
+
     by_category: dict[str, CategoryStats]
     outcomes: dict[str, int]
     failure_reasons: dict[str, int]
@@ -252,6 +269,12 @@ def aggregate(results: list[CaseResult]) -> BenchReport:
             tool_selection[name] = tool_selection.get(name, 0) + count
 
     n = len(results) or 1  # 只用来做除数，避免 total=0 时炸
+    correct_n = sum(r.correct for r in results)
+
+    # 只要有一个 case 算不出成本，整轮的总额就是不可信的 —— 报 None，别报一个偏小的数。
+    costs = [r.usage.cost_usd for r in results]
+    total_cost = None if any(c is None for c in costs) else sum(c or 0.0 for c in costs)
+
     return BenchReport(
         total=len(results),
         correct=sum(r.correct for r in results),
@@ -260,6 +283,13 @@ def aggregate(results: list[CaseResult]) -> BenchReport:
         broken_cases=sum(r.outcome == "broken_case" for r in results),
         avg_retries=sum(r.retry_count for r in results) / n,
         avg_tool_calls=sum(r.tool_calls_total for r in results) / n,
+        total_cost_usd=total_cost,
+        cost_per_correct_usd=(
+            total_cost / correct_n if total_cost is not None and correct_n else None
+        ),
+        avg_llm_calls=sum(r.usage.usage.calls for r in results) / n,
+        avg_tokens=sum(r.usage.usage.total_tokens for r in results) / n,
+        failure_token_overhead=_failure_overhead(results),
         by_category=by_category,
         outcomes=outcomes,
         failure_reasons=failure_reasons,
@@ -267,6 +297,22 @@ def aggregate(results: list[CaseResult]) -> BenchReport:
         total_duration_ms=sum(r.duration_ms for r in results),
         results=results,
     )
+
+
+def _failure_overhead(results: list[CaseResult]) -> float | None:
+    """失败 case 比成功 case 平均多烧多少 token，返回比例（0.4 = 多 40%）。
+
+    两边任意一边没有样本、或者成功那边是 0 token（ScriptedLLM），就返回 None ——
+    **除数是 0 的时候不要编一个数出来**。
+    """
+    ok = [r.usage.usage.total_tokens for r in results if r.correct]
+    bad = [r.usage.usage.total_tokens for r in results if not r.correct]
+    if not ok or not bad:
+        return None
+    ok_avg = sum(ok) / len(ok)
+    if ok_avg == 0:
+        return None
+    return (sum(bad) / len(bad) - ok_avg) / ok_avg
 
 
 def format_report(report: BenchReport) -> str:
@@ -314,6 +360,26 @@ def format_report(report: BenchReport) -> str:
     lines += ["", "工具选择分布", "-" * 78]
     for name, count in sorted(report.tool_selection.items(), key=lambda kv: -kv[1]):
         lines.append(f"  {name:<24}{count}")
+
+    lines += ["", "成本", "-" * 78]
+    if report.total_cost_usd is None:
+        lines.append("  总花费                  未知（定价表里没有这个模型）")
+    else:
+        lines.append(f"  总花费                  ${report.total_cost_usd:.4f}")
+    if report.cost_per_correct_usd is not None:
+        lines.append(
+            f"  ★ 平均修对一个           ${report.cost_per_correct_usd:.4f}"
+            "   （失败烧的钱也摊在这里）"
+        )
+    lines.append(
+        f"  平均 LLM 调用           {report.avg_llm_calls:.1f} 次 / case"
+        f"   平均 {report.avg_tokens:,.0f} token"
+    )
+    if report.failure_token_overhead is not None:
+        lines.append(
+            f"  失败 case 多烧           {report.failure_token_overhead:+.0%} token"
+            "（对比成功 case）"
+        )
 
     lines += [
         "",

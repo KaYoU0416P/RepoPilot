@@ -17,7 +17,9 @@ from repopilot.agent.schemas import (
     ToolCallRecord,
 )
 from repopilot.agent.state import AgentState
+from repopilot.config import get_settings
 from repopilot.llm.base import LLMClient, LLMError
+from repopilot.llm.usage import Usage, UsageReport, estimate_cost
 from repopilot.observability import get_logger
 from repopilot.tools import ToolRegistry, ToolResult
 from repopilot.workspace import Workspace
@@ -205,6 +207,7 @@ class Nodes:
         diff = await self.registry.call("git_diff", self.ws)
         verdict = state.get("verdict", "failed")
         test = state.get("test_result")
+        usage = self._usage_report()
 
         lines = [
             f"verdict: {verdict}",
@@ -213,6 +216,8 @@ class Nodes:
             + (f" ({test.summary})" if test else ""),
             f"attempts: {state['retry_count'] + 1}",
             f"tool calls: {len(state.get('tool_calls') or [])}",
+            f"llm calls: {usage.usage.calls}  tokens: {usage.usage.total_tokens}"
+            + (f"  cost: ${usage.cost_usd:.4f}" if usage.cost_usd is not None else "  cost: ?"),
         ]
         if state.get("errors"):
             lines.append(f"errors: {len(state['errors'])}")
@@ -220,9 +225,21 @@ class Nodes:
         return {
             "diff": diff.content,
             "final_report": "\n".join(lines),
+            "usage": usage,
             "tool_calls": [_record(diff)],
             "step_log": ["finish"],
         }
+
+    def _usage_report(self) -> UsageReport:
+        """把客户端的累计用量折算成成本。
+
+        在 finish 里一次性读走，而不是每个节点各记一笔：客户端本身就是
+        per-run 的累加器，节点再做一次加法只会重复计数。
+        """
+        model = getattr(self.llm, "model", "unknown")
+        usage = getattr(self.llm, "usage", None) or Usage()
+        cost = estimate_cost(usage, model, get_settings().pricing_for(model))
+        return UsageReport(model=model, usage=usage, cost_usd=cost.total_usd)
 
 
 def _strip_line_numbers(text: str) -> str:

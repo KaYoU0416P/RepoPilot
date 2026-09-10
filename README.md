@@ -35,7 +35,7 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 225 passed / 2 skipped
+make test          # 244 passed / 2 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
@@ -127,6 +127,37 @@ push 重复是 no-op，开 PR 前先查同 head 的 PR——崩在任何一步�
 
 `Worker._slots`（同时几个 Agent，默认 2）× `ToolRegistry._semaphore`
 （单个 Agent 内工具并发，默认 4）—— 是**乘**的关系，最坏 8 个工具同时在跑。
+
+### Token 计量与成本
+
+`LLMClient` 只有 `structured()` 一个方法，所以**整个系统调模型的出口只有一处**，
+加计量就是那一处加两行。记账在解析**之前**——schema 校验失败照样是花了钱的。
+
+三个容易搞错的点：
+
+- **响应里的 token 字段有四个不是两个。** `input_tokens` 只是**没命中缓存**的
+  那部分，另外两桶是 `cache_creation` / `cache_read`，三者互斥。只看第一个会
+  以为自己特别省，其实只是没把另外两桶加进来。
+- **算不出来要报 `None`，不能报 0。** 定价表里查不到的模型成本是「未知」——
+  把未知报成免费，一个模型 ID 拼错就能让整份账单看起来是免费的。
+- **成本的分母是「修对的数量」，不是总数。** 失败也烧钱，那部分要摊到成功上，
+  否则「全部失败但很便宜」的 Agent 会显得性价比最高。
+
+`make bench` 的成本段（数字是**造的样例**，还没跑过真实 LLM）：
+
+```
+  总花费                  $0.2760
+  ★ 平均修对一个           $0.0920   （失败烧的钱也摊在这里）
+  平均 LLM 调用           4.0 次 / case   平均 21,291 token
+  失败 case 多烧           +121% token（对比成功 case）
+```
+
+**prompt caching 算完决定不开。** 缓存是前缀匹配，渲染顺序是
+`tools → system → messages`，而三个节点的 `tools`（JSON Schema）各不相同 →
+没有共享前缀；就算有也不够长——Sonnet 4.6 的最小可缓存前缀是 **2048 token**，
+SYSTEM 只有 959 字符 ≈ 240 token。**低于下限不报错，只是静默不缓存**，
+而写缓存按 1.25 倍计费。所以先量再说：`cache_read_input_tokens` 已经接进报表，
+它长期是 0 就说明缓存没生效。
 
 ## 评测基准集
 
@@ -247,8 +278,8 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 **已完成**：Agent 闭环（LangGraph 六节点 + 重试条件边）、6 个工具、三层隔离、
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
-18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志。
-**225 passed / 2 skipped，ruff 全绿。**
+18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本。
+**244 passed / 2 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 

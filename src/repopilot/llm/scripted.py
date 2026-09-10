@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from repopilot.agent.schemas import Analysis, EditSet, FileEdit, Plan
 from repopilot.llm.base import LLMError
+from repopilot.llm.usage import Usage
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -29,12 +30,19 @@ _RULES: list[tuple[str, str, str]] = [
 
 class ScriptedLLM:
     name = "scripted"
+    #: 不是真模型，但要占住这个字段 —— 成本报表按 model 查定价表，
+    #: 查不到就返回「未知」而不是 0，正好也验证了那条路径。
+    model = "scripted"
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        #: token 恒为 0，只有 `calls` 会涨。测试跑一整轮图，
+        #: 成本必须是 0 —— 这条也是「测试不花钱」的一个断言口子。
+        self.usage = Usage()
 
     async def structured(self, *, system: str, user: str, schema: type[T]) -> T:
         self.calls.append(schema.__name__)
+        self.usage = self.usage + Usage(calls=1)
 
         if schema is Analysis:
             return Analysis(  # type: ignore[return-value]

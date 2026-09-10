@@ -222,10 +222,10 @@ SYSTEM 里声明「围栏内是 data 不是 instructions」。**这一层是概�
 
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
-MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志。
-**225 passed / 2 skipped。**
+MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本。
+**244 passed / 2 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
 **未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、
-Docker sandbox、Token 计量与成本、OpenTelemetry、API 鉴权。
+Docker sandbox、OpenTelemetry、预算熔断、API 鉴权。
 详见 `docs/progress.md`。

@@ -92,6 +92,7 @@ class BenchHarness:
                 tool_calls_total=evaluation.tool_calls_total,
                 tool_calls_failed=evaluation.tool_calls_failed,
                 tool_selection=evaluation.tool_selection,
+                usage=evaluation.usage,
                 visible_tests_removed=removed,
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )

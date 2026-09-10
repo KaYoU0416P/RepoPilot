@@ -7,9 +7,10 @@ is real, and why it failed.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from repopilot.agent.state import AgentState
+from repopilot.llm.usage import UsageReport
 
 FailureReason = Literal[
     "none",
@@ -31,6 +32,12 @@ class RunEvaluation(BaseModel):
     diff_valid: bool
     files_changed: int
     failure_reason: FailureReason
+    #: token 用量 + 成本估算。
+    #:
+    #: 塞在这里而不是另开一条链路，是因为 `runner.py` 已经把整个
+    #: `RunEvaluation` 存进 `runs.evaluation`（jsonb）了 —— 加字段即落库，
+    #: 不用改 schema、不用迁移。要按成本聚合时再从 jsonb 里提升成列。
+    usage: UsageReport = Field(default_factory=UsageReport)
 
 
 def evaluate_run(state: AgentState) -> RunEvaluation:
@@ -57,6 +64,7 @@ def evaluate_run(state: AgentState) -> RunEvaluation:
         diff_valid=diff_valid,
         files_changed=len(changed),
         failure_reason=_failure_reason(state, tests_passed, diff_valid),
+        usage=state.get("usage") or UsageReport(),
     )
 
 

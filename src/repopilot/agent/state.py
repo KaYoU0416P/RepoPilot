@@ -10,6 +10,7 @@ import operator
 from typing import Annotated, Literal, TypedDict
 
 from repopilot.agent.schemas import Analysis, EditSet, Plan, TestOutcome, ToolCallRecord
+from repopilot.llm.usage import UsageReport
 
 Verdict = Literal["success", "retry", "failed"]
 
@@ -29,6 +30,9 @@ class AgentState(TypedDict, total=False):
     diff: str
     verdict: Verdict
     final_report: str
+    #: token 用量 + 成本。由 finish 节点从 LLM 客户端一次性读走 ——
+    #: **不加 reducer**：客户端自己已经在累加了，这里再累加一次会翻倍。
+    usage: UsageReport | None
 
     # --- accumulated (reducers merge instead of replace) ---
     tool_calls: Annotated[list[ToolCallRecord], operator.add]
@@ -53,6 +57,7 @@ def initial_state(run_id: str, task: str, repo_path: str, max_retries: int) -> A
         diff="",
         verdict="retry",
         final_report="",
+        usage=None,
         tool_calls=[],
         errors=[],
         step_log=[],
