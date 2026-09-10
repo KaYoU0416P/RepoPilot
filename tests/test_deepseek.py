@@ -290,3 +290,27 @@ def test_the_bare_env_var_is_picked_up_too(monkeypatch):
         assert settings.deepseek_api_key == "sk-bare"
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [("DEEPSEEK_API_KEY", "deepseek_api_key"), ("ANTHROPIC_API_KEY", "anthropic_api_key")],
+)
+def test_a_bare_key_in_a_dotenv_file_is_read(tmp_path, monkeypatch, name, field):
+    """★这条钉的是一个真踩到的 bug。
+
+    `env_prefix="REPOPILOT_"` 只作用于**字段名推导出来的**变量名。所以
+    `.env` 里写裸的 `DEEPSEEK_API_KEY=...` 会被**静默忽略** —— 不报错、
+    不警告，只是降级成 scripted，然后你对着一份全 0 的报表发呆。
+    而裸名字正是官方文档教的写法，`.env.example` 里也一直是裸的。
+
+    原来的 `os.environ.get()` 兜底只捞得到**进程环境变量**，捞不到 `.env` 文件，
+    两条来源只补了一条。修法是字段上挂 `AliasChoices`，一次覆盖两条。
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(f"{name}=sk-from-dotenv\n", encoding="utf-8")
+    # 进程环境里没有它，只能从 .env 文件读到
+    monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv(f"REPOPILOT_{name}", raising=False)
+
+    assert getattr(Settings(), field) == "sk-from-dotenv"

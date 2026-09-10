@@ -941,3 +941,47 @@ if "model" not in s.model_fields_set:
 
 > **要记的**：「有没有设过」和「设成了什么」是两个不同的问题。
 > 只看值的话，`model == "claude-sonnet-4-6"` 分不清这两种情况。
+
+### 配置里最危险的失败形态：静默忽略
+
+这次交付 `.env` 时当场踩到的，值得单独记一条。
+
+`Settings` 上写了 `env_prefix="REPOPILOT_"`，我又在 `.env.example` 里写
+`ANTHROPIC_API_KEY=sk-...`（官方文档教的裸名字）。结果是：
+
+**`.env` 里的这一行一直被静默忽略。** 不报错、不警告，
+只是 `llm_provider` 悄悄降级成 `scripted`，然后你对着一份全 0 的报表发呆。
+
+原因：`env_prefix` 只作用于**从字段名推导出来的**变量名。
+`deepseek_api_key` 只认 `REPOPILOT_DEEPSEEK_API_KEY`，裸的那个它根本不看。
+
+更阴的是我原本的"兜底"：
+
+```python
+if not s.anthropic_api_key:
+    s.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+```
+
+`os.environ` 只有**进程环境变量**，**没有 `.env` 文件的内容**。
+所以这段兜底捞得到 `export ANTHROPIC_API_KEY=...`，捞不到写在 `.env` 里的同名行 ——
+**两条来源只补了一条，而两条看起来是一回事。**
+
+正确的修法是让字段自己认多个名字，一次覆盖所有来源：
+
+```python
+deepseek_api_key: str = Field(
+    "", validation_alias=AliasChoices("REPOPILOT_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+)
+```
+
+**Java 对照**：Spring 的 `@ConfigurationProperties(prefix=...)` 撞上
+`@Value("${BARE_NAME}")` 是同一个坑；解法也类似 —— 让绑定层认别名，
+而不是在业务代码里手工 `System.getenv()` 补。
+
+> **要记的三条**：
+> 1. **配置读不到，最常见的表现不是报错，是"值是默认值"。** 而默认值往往
+>    还挺合理（这里是"降级成离线模式"），于是错误被伪装成正常行为。
+> 2. **"兜底代码"要问清楚它兜的是哪一条来源。** 环境变量、`.env`、配置中心、
+>    命令行参数是四条不同的路，补一条不等于补全。
+> 3. **凡是"配了但没生效"的类别，写一条测试。** 这里的测试是造一个临时目录、
+>    写一个真的 `.env`、`chdir` 进去、断言字段读到了 —— 比读十遍文档可靠。

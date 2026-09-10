@@ -34,7 +34,7 @@
 
 ## NOW
 
-### Stage D 第四步 — DeepSeek provider（276 passed / 2 skipped，ruff 全绿）
+### Stage D 第四步 — DeepSeek provider（278 passed / 2 skipped，ruff 全绿）
 
 **动机是成本**：18 个 case 跑 Anthropic 要几美元，跑 DeepSeek 是几毛。
 但顺带拿到一个更值钱的东西 —— **同一套基准集横评两个模型**，
@@ -62,7 +62,14 @@
   用 pydantic 的 `model_fields_set` 区分「用户就是要这个」和「用户压根没管」——
   否则「换了 provider 忘了换 model」会把 `claude-sonnet-4-6` 发给 DeepSeek。
 - 测试切在 `httpx.MockTransport` 上（和 `test_publishing.py` 一致）：
-  HTTP 那层是假的，**解析 / 映射 / 计量全是真的跑了一遍**。19 条，不联网不花钱。
+  HTTP 那层是假的，**解析 / 映射 / 计量全是真的跑了一遍**。21 条，不联网不花钱。
+- ★**顺手修了一个一直存在的静默 bug**：`env_prefix="REPOPILOT_"` 只作用于
+  **字段名推导出来的**变量名，所以 `.env` 里写裸的 `ANTHROPIC_API_KEY=...`
+  **一直是被静默忽略的** —— 不报错、不警告，只是降级成 scripted。
+  而裸名字正是官方文档教的写法，`.env.example` 里也一直是裸的。
+  原来的 `os.environ.get()` 兜底只捞得到**进程环境变量**，捞不到 `.env` 文件，
+  两条来源只补了一条。修法：字段上挂 `AliasChoices`，一次覆盖两条来源，
+  顺便把 `get_settings()` 里那段手工兜底删掉了。两条参数化测试钉住。
 
 **还没跑过真实 key** —— 下一步就是这个。
 

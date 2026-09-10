@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -36,8 +36,21 @@ class Settings(BaseSettings):
     # --- LLM ---
     llm_provider: Literal["anthropic", "deepseek", "scripted"] = "anthropic"
     model: str = "claude-sonnet-4-6"
-    anthropic_api_key: str = ""
-    deepseek_api_key: str = ""
+    #: ★两个 key 都用 `AliasChoices` 同时认**带前缀**和**裸**两种写法。
+    #:
+    #: 为什么必须这样：`env_prefix` 只作用于**字段名推导出来的**变量名，
+    #: 所以光有前缀的话，`.env` 里写 `ANTHROPIC_API_KEY=...` 会被**静默忽略** ——
+    #: 不报错、不警告，只是降级成 scripted，然后你对着一份全 0 的报表发呆。
+    #: 而裸名字恰恰是官方文档教你写的那个，`.env.example` 里也一直是裸的。
+    #:
+    #: 之前用 `os.environ.get()` 兜底，那只能捞到**进程环境变量**，
+    #: 捞不到 `.env` 文件 —— 两条来源只补了一条。`AliasChoices` 一次覆盖两条。
+    anthropic_api_key: str = Field(
+        "", validation_alias=AliasChoices("REPOPILOT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
+    )
+    deepseek_api_key: str = Field(
+        "", validation_alias=AliasChoices("REPOPILOT_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+    )
     #: 默认走 beta 通道：`strict`（保证 tool_call 参数符合 JSON Schema）只在那里有。
     #: 换成 Qwen / Kimi / GLM 的兼容端点也是改这一项。
     deepseek_base_url: str = "https://api.deepseek.com/beta"
@@ -142,24 +155,18 @@ DEFAULT_MODELS = {
     "deepseek": "deepseek-v4-pro",
 }
 
-#: provider → (设置里的 key 字段, 裸环境变量名)。
-#: 裸环境变量是给「照着官方文档 export 了一下」的人兜底的，
-#: 官方文档不会教你写 `REPOPILOT_` 前缀。
-_PROVIDER_KEYS = {
-    "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
-    "deepseek": ("deepseek_api_key", "DEEPSEEK_API_KEY"),
+#: provider → 它的 key 字段名。裸 / 带前缀两种写法由字段上的
+#: `AliasChoices` 负责，这里只关心「这个 provider 的 key 拿到了没有」。
+_PROVIDER_KEY_FIELDS = {
+    "anthropic": "anthropic_api_key",
+    "deepseek": "deepseek_api_key",
 }
 
 
 @lru_cache
 def get_settings() -> Settings:
     """Cached so the whole process shares one Settings instance."""
-    import os
-
     s = Settings()
-    for field, env_var in _PROVIDER_KEYS.values():
-        if not getattr(s, field):
-            setattr(s, field, os.environ.get(env_var, ""))
 
     # 没设过 model 就跟着 provider 走。`model_fields_set` 是 pydantic 记录的
     # 「这个字段是被显式赋过值，还是在吃默认值」—— 用它才能区分
@@ -169,7 +176,7 @@ def get_settings() -> Settings:
 
     # 选了某个 provider 却没有它的 key → 降级成 scripted。
     # 不抛异常是刻意的：跑测试和 demo 的人不该被迫先去申请 key。
-    entry = _PROVIDER_KEYS.get(s.llm_provider)
-    if entry is not None and not getattr(s, entry[0]):
+    field = _PROVIDER_KEY_FIELDS.get(s.llm_provider)
+    if field is not None and not getattr(s, field):
         s.llm_provider = "scripted"
     return s
