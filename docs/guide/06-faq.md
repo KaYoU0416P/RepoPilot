@@ -414,7 +414,7 @@ docker images | grep pgvector      # 确认本机有这个镜像
 ```bash
 make sync      # 装依赖（永远用这个）
 make db-up     # 起 PG（会等到真的能连）
-make test      # 302 passed
+make test      # 303 passed
 make test-nodb # 不需要数据库的那部分
 make demo      # 单跑一次 Agent，不起服务不用 key
 make run       # uvicorn :8000，/docs 有 Swagger

@@ -26,7 +26,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 **定位**：把 Coding Agent 接进真实研发流程的后端服务。不是「能改代码的脚本」，
 是「Issue → Run → 审批 → PR」这条业务链路。
 
-**当前状态：302 passed / 2 skipped，ruff 全绿，master 干净。**
+**当前状态：303 passed / 2 skipped，ruff 全绿，master 干净。**
 
 先读这三份，不要凭猜：
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
@@ -192,7 +192,7 @@ pytest 有 `pythonpath=["src"]` 兜底，但 **uvicorn 和 scripts/ 下的脚本
 
 ```
 make sync / db-up / db-reset / psql
-make test (302 passed / 2 skipped) / test-fast / test-nodb
+make test (303 passed / 2 skipped) / test-fast / test-nodb
 make demo / run(:8000, /docs)
 make bench (需 provider 的 API key) / bench-check (不花钱)
 make mcp / mcp-smoke
@@ -207,8 +207,9 @@ make trace (开着 OTel 跑一次 demo，span 打到 stderr)
    面试要主动说明，别等人发现。
 2. **评测已跑过真实 LLM**（DeepSeek-v4-pro，18 case × 3 轮）：可靠成功率 72%，
    平均修对一个 $0.0090，`false_success` 9/54。但**只测过一个模型、3 轮**，
-   而且注入那 9/9 **没法区分「防御起作用」和「模型本来就不上当」**——
-   要证明防御有效得做 A/B（关掉 `fence_task` 再跑一遍）。
+   注入防护**已做 A/B 对照**：关掉防御后载荷落地 0/9 → 4/9、hijacked 0 → 4，
+   **防御被证明有效**。剩下的边界：只测过一个模型、载荷只有 3 个、
+   `file_content` 那条路依然防不住（刻意的，A/B 里它纹丝不动正好证明了这点）。
 
 ## 开始
 
