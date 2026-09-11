@@ -29,6 +29,8 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 **当前状态：403 passed / 4 skipped，ruff 全绿，master 干净。**
 
 先读这三份，不要凭猜：
+- `docs/resume.md` — **简历那一段 + 30 秒自述 + 10 个深挖问答**。
+  想知道"这个项目哪些点是拿得出手的"，看这份最快。
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
 - `docs/architecture.md` — 主调用链、模块职责、状态机、可靠性机制
 - `docs/progress.md` — DONE / NOW / NEXT / 已知缺口

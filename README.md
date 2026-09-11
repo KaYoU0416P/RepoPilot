@@ -683,7 +683,7 @@ db/schema.sql             3 张表：runs / webhook_deliveries / approvals
 benchmarks/cases/         18 个 case（15 seeded bug + 3 注入）+ 隐藏测试 + 参考答案
 fixtures/sample_repo/     演示与测试用的目标仓库
 scripts/                  demo / bench / mcp_server / sandbox_check / clone_check
-docs/                     架构、进度、面试笔记、故障复盘
+docs/                     架构、进度、面试笔记、故障复盘、简历与面试稿
 docs/guide/               小白完全版教程（语法、内核、框架、主线逐行）
 ```
 
