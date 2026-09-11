@@ -58,10 +58,17 @@ class Workspace:
 
     def iter_files(self, pattern: str = "**/*") -> list[Path]:
         out: list[Path] = []
+        root = self.root.resolve()
         for p in sorted(self.root.glob(pattern)):
             if not p.is_file():
                 continue
             if any(part in _IGNORED for part in p.parts):
+                continue
+            # 指向 workspace 外面的符号链接不列出来。`is_file()` 是**跟着链接判断**
+            # 的，所以 `notes -> ~/.ssh/id_rsa` 在上面那一行会被当成普通文件，
+            # 然后出现在 `tree()` 里 —— 等于主动告诉 Agent「这儿有个文件可以读」。
+            if p.is_symlink() and root not in p.resolve().parents:
+                log.warning("忽略越界符号链接: %s -> %s", p, p.resolve())
                 continue
             out.append(p)
         return out
@@ -86,6 +93,18 @@ class WorkspaceManager:
             source_repo,
             target,
             ignore=shutil.ignore_patterns(*_IGNORED),
+            # ★`symlinks=True` 在接陌生仓库之后从「细节」变成了「安全边界」。
+            #
+            # 默认的 `symlinks=False` 会**跟着链接走，把指向的内容拷过来**。
+            # 于是仓库里一个 `notes -> /Users/you/.ssh/id_rsa` 的链接，会在
+            # workspace 里变成一个装着你私钥的**真文件** —— Agent 读得到，
+            # 还会被 `git add -A` 收进 diff，一路进到 PR 里。
+            # `resolve()` 的越界检查在这种情况下一点用都没有：它检查的是路径，
+            # 而内容早在拷贝那一刻就已经越界了。
+            #
+            # 保留成链接之后，`resolve()` 的 `.resolve()` 会跟到 workspace 外面，
+            # 越界检查这才真正生效。
+            symlinks=True,
         )
         ws = Workspace(run_id=run_id, root=target)
         self._git_init(ws)

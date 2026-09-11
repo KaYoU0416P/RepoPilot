@@ -18,6 +18,9 @@ POST /webhooks/github         api/routes.py::github_webhook
   │                           失败 → 401，且**什么都不记账**
   ├─▶ claim_delivery          X-GitHub-Delivery 当幂等键，重投直接 200
   ├─▶ extract_issue_trigger   没打 repopilot 标签 → 忽略（仍返回 2xx）
+  ├─▶ 允许名单               github_repo_allowlist，留空 = 不限（第三道纵深）
+  ├─▶ RepoCache.path_for      纯函数，算出目标仓库**将来**在缓存里的位置
+  │                           （此刻还没 clone —— 见下面 Runner._prepare_repo）
   └─▶ runs_repo.create_run    source='github_issue'，汇入下面同一条链路
 
 POST /runs                    api/routes.py::create_run
@@ -28,7 +31,12 @@ Worker.run_forever            worker/worker.py       ← 后台常驻
   ├─▶ Semaphore.acquire       先占坑再去捞任务，没空位就不捞
   ├─▶ runs_repo.claim_next_run    CLAIM_SQL: FOR UPDATE SKIP LOCKED + 租约
   └─▶ Runner.execute          worker/runner.py
-        ├─▶ WorkspaceManager.create    copytree + git baseline commit
+        ├─▶ Runner._prepare_repo      ★只有 source='github_issue' 走这条
+        │     ├─▶ 闸门：没开容器沙箱 → RunFailed，进终态不重试
+        │     └─▶ RepoCache.ensure    .repos/<owner>/<repo>，clone 或 fetch
+        │           clone 在这里做**而不在 webhook 里**：
+        │           GitHub 对 webhook 10 秒就判超时并重投
+        ├─▶ WorkspaceManager.create    copytree(symlinks=True) + git baseline commit
         ├─▶ heartbeat_loop            后台续租，防止长任务被抢走
         ├─▶ graph.astream             LangGraph
         │     analyze   → list_files, LLM → Analysis
@@ -88,7 +96,7 @@ Agent 自己说成功不算数，必须有人看过 diff。
 | `worker/` | 领取循环、限流、租约、事件总线 | 具体在跑什么图 |
 | `agent/` | State、节点、边、提示词 | HTTP、子进程 |
 | `tools/` | 工具契约与注册表、超时与并发上限 | 图、LLM |
-| `workspace/` | 仓库副本、路径收敛 | 工具、Agent |
+| `workspace/` | 仓库副本、路径收敛、**clone 缓存** | 工具、Agent |
 | `sandbox/` | 带硬超时的进程执行 | 在跑什么 |
 | `llm/` | 供应商适配、结构化输出、用量计量 | 工具、workspace |
 | `evaluation/` | 轨迹指标、评测基准集与判分 | HTTP、LLM、数据库 |
@@ -96,17 +104,20 @@ Agent 自己说成功不算数，必须有人看过 diff。
 依赖单向：`api → worker → agent → tools → {workspace, sandbox}`；
 `db`、`domain`、`llm`、`evaluation` 是叶子。
 
-## 三层隔离
+## 隔离：从路径收敛到内核级
 
 | 风险 | 措施 | 代码位置 |
 |---|---|---|
 | 模型写到仓库外 | `Workspace.resolve()` 拒绝绝对路径、`..`、符号链接逃逸 | `workspace/manager.py` |
+| **陌生仓库里的符号链接** | `copytree(symlinks=True)` 保留成链接（默认会跟着链接把内容拷进来，越界检查就形同虚设） | `workspace/manager.py` |
+| **陌生仓库名注入** | 正则限制首字符（`-` 开头会被 git 当选项）+ 命令加 `--` | `workspace/repos.py` |
+| **PAT 泄露** | 走 `GIT_CONFIG_*` 环境变量：不落 `.git/config`、不进 argv | `workspace/repos.py` |
 | 模型写进 `.git/` | 同上；`.git` 是 git 的**控制面**（`core.fsmonitor` 能在宿主机执行命令） | `workspace/manager.py` |
 | 生成的代码不终止 | 墙钟超时 + `os.killpg` 杀整个进程组 | `sandbox/local.py` |
 | 改坏真实仓库 | 全程操作 `copytree` 副本 | `workspace/manager.py` |
 | **模型代码联网 / 读宿主机文件** | **一次性容器：`--network none`、`--cap-drop ALL`、内存/PID 上限、只读根、非 root** | `sandbox/docker.py` |
 
-**应用层隔离 vs 内核级隔离**：前四条靠的是我们自己不写出破绽，
+**应用层隔离 vs 内核级隔离**：除了最后一条，其余全靠我们自己不写出破绽，
 `import socket` 一行就绕过去了。容器那条是内核给的。实测对照
 （`make sandbox-check ARGS=--local`）：本地子进程里探针**联网成功、
 能读 `.env` 里的 API key**。
@@ -310,9 +321,9 @@ publish                   publishing/github.py   另一条 trace，靠 run_id �
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
 MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪、DeepSeek provider。**358 passed / 4 skipped。**
+OpenTelemetry 链路追踪、DeepSeek provider。**385 passed / 4 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
-**未完成**：clone 陌生仓库（webhook 入队时 `repo_path` 还是内置样例）、
-Docker sandbox、trace 接真后端（现在只导控制台）、预算熔断、API 鉴权。
-详见 `docs/progress.md`。
+**未完成**：API 鉴权、trace 接真后端（现在只导控制台）、
+容器镜像按目标仓库的 requirements 装依赖（那一步本身也在跑别人的代码）、
+clone 缓存的跨进程锁与容量上限。详见 `docs/progress.md`。

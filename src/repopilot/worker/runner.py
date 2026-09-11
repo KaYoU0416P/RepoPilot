@@ -15,11 +15,13 @@ from repopilot.db import runs as runs_repo
 from repopilot.db.models import RunRow
 from repopilot.domain import RunStatus
 from repopilot.evaluation import evaluate_run
+from repopilot.github import parse_external_ref
 from repopilot.llm import build_llm
 from repopilot.observability import get_logger, run_id_var, set_attrs, span
 from repopilot.tools import build_registry
 from repopilot.worker.bus import EventBus
 from repopilot.workspace import WorkspaceManager
+from repopilot.workspace.repos import RepoCache
 
 log = get_logger(__name__)
 
@@ -57,8 +59,10 @@ class Runner:
 
         heartbeat_task: asyncio.Task | None = None
         try:
-            workspace = self.workspaces.create(Path(row.repo_path), run_id=str(row.id))
-            emit("run_started", message=f"workspace 就绪: {workspace.root.name}")
+            emit("run_started", message="准备仓库…")
+            repo_path = await self._prepare_repo(row, emit)
+            workspace = self.workspaces.create(repo_path, run_id=str(row.id))
+            emit("node_completed", node="workspace", message=f"workspace: {workspace.root.name}")
 
             # 续租心跳：Agent 可能跑好几分钟，租约不能中途过期
             heartbeat_task = asyncio.create_task(
@@ -147,6 +151,12 @@ class Runner:
             # 不改状态：租约会过期，任务自然回到队列被别人接手
             emit("run_error", message="worker 被取消，任务将由租约回收")
             raise
+        except RunFailed as exc:
+            # 配置/数据问题（没开沙箱、external_ref 坏了）。重试一万次也是同样
+            # 的结果，**直接进终态**，别白占三个 attempt 还让人以为是网络抖动。
+            log.error("run 被拒绝执行: %s", exc)
+            await self._fail(row, str(exc), retryable=False)
+            emit("run_error", message=str(exc))
         except Exception as exc:  # noqa: BLE001
             log.exception("run 执行异常")
             await self._fail(row, f"{type(exc).__name__}: {exc}")
@@ -157,6 +167,45 @@ class Runner:
             self.bus.close(row.id)
             run_id_var.reset(token)
 
+    # --------------------------------------------------------------- 取仓库
+    async def _prepare_repo(self, row: RunRow, emit) -> Path:
+        """把 `row` 指向的仓库变成一个本地目录。
+
+        两种来源，判据是 `source`：
+
+        - `manual`      —— `repo_path` 本来就是本机上一个目录（demo / 评测 /
+                           自己的仓库），原样返回。
+        - `github_issue`—— `repo_path` 是缓存里的**预期位置**，现在才真去
+                           clone / fetch。仓库地址从 `external_ref`
+                           （`"owner/repo#42"`）推出来 —— 发布链路一直是这么
+                           干的，所以不需要在 runs 表里加一列存 URL。
+
+        ★clone 放在这里而不是 webhook 里：见 `routes.py` 第 5 步的注释。
+        """
+        if row.source != "github_issue":
+            return Path(row.repo_path)
+
+        ref = parse_external_ref(row.external_ref)
+        if ref is None:
+            raise RunFailed(f"github_issue 来源但 external_ref 不可解析: {row.external_ref!r}")
+        full_name = ref[0]
+
+        # ★闸门：clone 来的是**陌生人的代码**，跑它的测试等于在本机执行任意代码。
+        # 本地子进程沙箱是应用层的，一行 `import socket` 就绕过去了
+        # （`make sandbox-check --local` 实测：联网成功、`.env` 可读）。
+        # 所以这里不是警告而是拒绝 —— 配置项 `require_sandbox_for_remote_repos`。
+        if self.settings.require_sandbox_for_remote_repos and self.settings.sandbox != "docker":
+            raise RunFailed(
+                f"拒绝执行远端仓库 {full_name}：sandbox={self.settings.sandbox!r}，"
+                "跑陌生仓库的测试必须开容器沙箱（REPOPILOT_SANDBOX=docker，"
+                "先 make sandbox-image）"
+            )
+
+        emit("node_completed", node="clone", message=f"准备仓库 {full_name}…")
+        path = await RepoCache(self.settings).ensure(full_name)
+        emit("node_completed", node="clone", message=f"仓库就绪: {path.name}")
+        return path
+
     async def _heartbeat_loop(self, run_id, worker_id: str) -> None:
         interval = self.settings.lease_seconds / 3
         while True:
@@ -166,10 +215,10 @@ class Runner:
                 log.warning("run=%s 租约已丢失，停止续租", run_id)
                 return
 
-    async def _fail(self, row: RunRow, error: str) -> None:
+    async def _fail(self, row: RunRow, error: str, *, retryable: bool = True) -> None:
         """异常路径：还有重试次数就退回队列，否则标记失败。"""
         try:
-            if row.attempts < row.max_attempts:
+            if retryable and row.attempts < row.max_attempts:
                 await runs_repo.transition(row.id, RunStatus.QUEUED, error=error)
             else:
                 await runs_repo.transition(row.id, RunStatus.FAILED, error=error)

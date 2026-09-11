@@ -35,7 +35,7 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 358 passed / 4 skipped
+make test          # 385 passed / 4 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
@@ -79,6 +79,15 @@ curl -s -X POST localhost:8000/runs/$RID/approval \
 | 改坏真实仓库 | 全程操作 `copytree` 出来的副本 |
 | **模型代码联网 / 读宿主机文件** | **容器沙箱（`--network none` + 掉权限 + 资源上限）** |
 | Agent 自称成功 | 用测试结果判定，且状态机不允许 `running` 直达 `published` |
+
+**目标仓库本身也不可信**（clone 陌生仓库之后才成立的那一类）：
+
+| 风险 | 措施 |
+|---|---|
+| **仓库里的符号链接指向宿主机私钥** | `copytree(symlinks=True)` 保留成链接，越界检查才真正生效——见下 |
+| **仓库名注入 git 命令行** | 正则限制首字符（`-` 开头会被 git 当选项）+ 命令加 `--` |
+| **PAT 落进长期存在的 `.git/config`** | 凭证走 `GIT_CONFIG_*` 环境变量，不落盘也不进 argv |
+| **没开容器沙箱就跑陌生仓库的测试** | `require_sandbox_for_remote_repos`，代码里的闸门不是注释里的警告 |
 
 **刻意没有通用 shell 工具**。唯一的执行类工具是 `run_tests`，命令行写死。
 有了 shell，上面所有限制都变成装饰品。
@@ -135,6 +144,69 @@ API key，又有网络把它发出去。`sandbox/local.py` 的隔离是**应用�
 `git_diff` 工具是在**宿主机**上跑 `git add` 的，git 刷新索引时就会执行它——
 一条完整的宿主机代码执行路径。所以 `resolve()` 直接拒绝 `.git/` 下的任何路径。
 **这是做容器沙箱时顺带查出来的，有回归测试钉着。**
+
+### clone 目标仓库
+
+```bash
+make clone-check                      # 真的对着 github.com clone 一次，验五件事
+make clone-check ARGS="--repo psf/requests"
+```
+
+两层目录，职责完全不同：
+
+```
+.repos/<owner>/<repo>     上游的镜像。一个仓库一份，只读 + fetch，Agent 碰不到
+.workspaces/<run_id>/     每个 run 一份副本。Agent 在里面改，跑完就删
+```
+
+**clone 不在 webhook 处理函数里做。** GitHub 对 webhook 的响应超时是 10 秒，
+clone 一个真实仓库远不止 —— 放进去就变成「每次都超时 → 每次都重投 →
+每次都重新 clone」。webhook 只用纯函数 `path_for()` 算出**将来**的路径写进
+`runs.repo_path`，真正的 clone 在 worker 领取任务时才做。
+
+**仓库地址不需要新加一列**：`external_ref` 里已经是 `owner/repo#42`，
+发布链路一直这么用。
+
+四个要点：
+
+- **`owner/repo` 来自 webhook payload，同时被拼成 URL 和文件系统路径。**
+  不校验的话 `a/../../etc` 就写出缓存根目录了。更隐蔽的是**以 `-` 开头的名字
+  会被 git 当成选项**（`--upload-pack=...` 是已知的 RCE 面），所以首字符单独
+  限制，命令里还加 `--` 终止符。
+- **PAT 既不落盘也不进 argv。** 拼进 URL → git 写进 `.git/config` 留在磁盘上；
+  `git -c http.extraheader=...` → 进程 argv **全机器可见**（`ps aux`）。
+  用 `GIT_CONFIG_COUNT/KEY/VALUE` 走环境变量，两样都避开。
+- **★没开容器沙箱就拒绝执行远端仓库**（`require_sandbox_for_remote_repos`）。
+  clone 来的是陌生人的代码，本地子进程沙箱一行 `import socket` 就绕过去了。
+  **能被违反而不报错的安全约定等于不存在**，所以这是代码里的闸门不是注释里的警告。
+- **clone 先写临时目录再原子改名。** 否则中途失败会在缓存里留下半份仓库，
+  而"有没有缓存"只看 `.git` 在不在 —— 下一个 run 会拿着残缺仓库干活。
+
+**实测踩到的坑：token 配错了，公开仓库也 clone 不下来。** 只要发了
+`Authorization` 头，GitHub 就按那个身份判，**不会因为仓库是公开的就退回
+匿名访问**。于是一个过期的 PAT 会让所有 clone 一起挂，报错却是
+`Invalid username or token` —— 看起来像仓库不存在。**发凭证不是免费的：
+错的凭证比不发凭证更糟。** 这句话现在直接写在报错里。
+
+### 陌生仓库里的符号链接
+
+`shutil.copytree` 默认 `symlinks=False` —— 它**跟着链接走，把内容拷过来**。
+于是陌生仓库里一个
+
+```
+notes.txt -> /Users/you/.ssh/id_rsa
+```
+
+会在 workspace 里变成一个**装着私钥的真文件**。`resolve()` 的越界检查完全
+看不见它：路径是合法的，内容早在拷贝那一刻就越界了。Agent 读得到，
+`git add -A` 还会把它收进 diff，一路进到 PR 里。
+
+改成 `symlinks=True` 保留成链接之后，`resolve()` 跟到 workspace 外面，
+越界检查这才**真正生效**。`iter_files()` 也顺手把越界链接从文件树里摘掉 ——
+列出来等于主动告诉 Agent「这儿有个文件可以读」。
+
+**这条是 clone 陌生仓库之后才成立的威胁**：以前的"目标仓库"是我们自己的
+`fixtures/sample_repo`，里面不会有恶意链接。
 
 ### 不信任进程活着
 
@@ -549,7 +621,7 @@ src/repopilot/
   worker/         领取循环、发布循环、限流、租约、事件总线
   agent/          AgentState、6 个节点、条件边、提示词
   tools/          工具契约与注册表（超时 + 并发上限 + 异常降级）
-  workspace/      仓库副本、路径收敛
+  workspace/      仓库副本、路径收敛、clone 缓存（.repos/）
   sandbox/        带硬超时的进程执行
   llm/            供应商适配（Anthropic / DeepSeek）、结构化输出、用量计量
   observability/  日志装配 + ContextVar 携带 run_id + OpenTelemetry 埋点
@@ -560,7 +632,7 @@ src/repopilot/
 db/schema.sql             3 张表：runs / webhook_deliveries / approvals
 benchmarks/cases/         18 个 case（15 seeded bug + 3 注入）+ 隐藏测试 + 参考答案
 fixtures/sample_repo/     演示与测试用的目标仓库
-scripts/                  demo / bench / mcp_server
+scripts/                  demo / bench / mcp_server / sandbox_check / clone_check
 docs/                     架构、进度、面试笔记、故障复盘
 docs/guide/               小白完全版教程（语法、内核、框架、主线逐行）
 ```
@@ -569,27 +641,26 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 
 ## 状态
 
-**已完成**：Agent 闭环（LangGraph 六节点 + 重试条件边）、6 个工具、三层隔离、
+**已完成**：Agent 闭环（LangGraph 六节点 + 重试条件边）、6 个工具、四层隔离（路径收敛 → `.git` 控制面 → 容器 → clone 闸门）、
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
 18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**358 passed / 4 skipped，ruff 全绿。**
+OpenTelemetry 链路追踪。**385 passed / 4 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 
 - **只测过一个模型（DeepSeek-v4-pro）、3 轮。** 换 Claude / GPT 结论可能完全不同，
   3 轮也只够看出"稳不稳"，不够给出置信区间。
-- **★注入 9/9 抵抗住了，但这不等于「防御有效」。** 这一轮**没法区分**
-  「`fence_task` 起了作用」和「模型本来就不上当」——要证明防御有效，得做 A/B：
-  关掉分隔符再跑一遍，看落点变不变。**没做这个对照之前，只能说「没被攻破」，
-  不能说「因为我的防御所以没被攻破」。**
 - 18 个 case 都是**小规模合成仓库**。真实项目的难点（几万行上下文、隐式约定、
   构建系统）完全没覆盖，这是基准集的天花板。
-- **注入的提示词防御是概率性的**，不是确定性的。挡不住经工具结果进来的载荷。
+- **注入的提示词防御是概率性的**，不是确定性的。挡不住经工具结果进来的载荷
+  （`file_content` 那条向量至今没有有效防御）。
 - **审计日志只在工具调用结束后记一条**，进程被 SIGKILL 打死在中间就没有记录。
-- webhook 入队时 `repo_path` 还是内置样例仓库，**没有真的 clone 目标仓库**。
-- sandbox 是本地子进程，**不是容器**。隔离靠路径收敛 + 超时，不是内核级。
-  接了陌生仓库之后这条优先级最高。
+- **容器镜像只预装了 pytest。** 接任意仓库还需要一个"按 requirements 装依赖"
+  的构建阶段，而**那一步本身也在跑别人的代码**（`setup.py` / build hook），
+  需要单独隔离。目前只能跑零依赖或纯 pytest 的仓库。
+- **clone 缓存的并发保护只在进程内**（`asyncio.Lock`）。多 worker 进程同时
+  命中同一个仓库要换文件锁。缓存也**不会淘汰**，长期跑要加上限。
 - 发布链路只在本地裸仓库上验证过（git 是真的，GitHub API 用 `MockTransport`），
   没打过真实 GitHub API。
 - webhook 的「登记投递」和「入队 run」不在同一个事务里。

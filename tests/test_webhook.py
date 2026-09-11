@@ -200,6 +200,45 @@ async def test_unlabeled_issue_is_ignored_but_still_2xx(client):
     assert await runs_repo.list_runs() == []
 
 
+# ================================================ 入队时指向的是目标仓库，不是样例
+async def test_the_run_points_at_the_target_repo_not_the_bundled_sample(client, settings):
+    """★以前这里写死 `settings.sample_repo` —— 也就是「webhook 收到任何 Issue，
+    Agent 都去修我们自己的样例仓库」。现在指向 clone 缓存里 `kayou/demo-repo`
+    将来所在的位置。
+
+    注意此刻那个目录**还不存在**：`path_for` 是纯函数，真正的 clone 要等
+    worker 领取任务时才做（webhook 的响应超时只有 10 秒）。
+    """
+    from repopilot.workspace.repos import RepoCache
+
+    body = (await post_webhook(client, issue_payload())).json()
+    row = await runs_repo.get_run(body["run_id"])
+
+    assert row.repo_path != str(settings.sample_repo)
+    assert row.repo_path == str(RepoCache(settings).path_for("kayou/demo-repo"))
+    assert row.repo_path.endswith("/kayou/demo-repo")
+
+
+async def test_a_repo_outside_the_allowlist_is_ignored(client, monkeypatch):
+    """允许名单是第三道纵深（前两道：验签 + Issue 标签）。留空 = 不限。"""
+    monkeypatch.setattr(get_settings(), "github_repo_allowlist", ["someone/else"])
+    response = await post_webhook(client, issue_payload())
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert await runs_repo.list_runs() == []
+
+
+async def test_a_malformed_repo_name_is_ignored_not_crashed(client):
+    """`repo_full_name` 会被拼成路径和 URL。畸形名字要在入队前就挡掉，
+    而且是 2xx 忽略 —— 5xx 会让 GitHub 反复重投同一个畸形事件。"""
+    payload = issue_payload()
+    payload["repository"]["full_name"] = "../../etc/passwd"
+    response = await post_webhook(client, payload)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert await runs_repo.list_runs() == []
+
+
 async def test_ping_event_is_answered_without_being_recorded(client):
     response = await post_webhook(client, {"zen": "Design for failure."}, event="ping")
     assert response.status_code == 200

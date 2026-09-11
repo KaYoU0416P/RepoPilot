@@ -1,4 +1,4 @@
-.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace sandbox-image sandbox-check clean
+.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace sandbox-image sandbox-check clone-check clean clean-repos
 
 # uv 在这台机器上写出来的 .pth 带 macOS UF_HIDDEN 标志，而 CPython 的 site.py
 # 会静默跳过隐藏的 .pth -> import repopilot 失败。详见 docs/failures.md。
@@ -96,5 +96,16 @@ sandbox-image:
 sandbox-check: sync
 	uv run --no-sync python scripts/sandbox_check.py $(ARGS)
 
+# ------------------------------------------------------------------ 取仓库
+# 真的对着 github.com clone 一次。单元测试里的"远端"是本机裸仓库，
+# 认证 / HTTPS / 仓库不存在 这三条路它一条都没覆盖到。
+clone-check: sync
+	uv run --no-sync python scripts/clone_check.py $(ARGS)
+
 clean:
 	rm -rf .workspaces .pytest_cache .ruff_cache
+
+# clone 缓存单独一个目标：它是**可重建的**（删了下次 run 自己 clone 回来），
+# 但重建要花几十秒到几分钟，不该混进天天跑的 `make clean` 里。
+clean-repos:
+	rm -rf .repos

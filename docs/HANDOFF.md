@@ -26,7 +26,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 **定位**：把 Coding Agent 接进真实研发流程的后端服务。不是「能改代码的脚本」，
 是「Issue → Run → 审批 → PR」这条业务链路。
 
-**当前状态：358 passed / 4 skipped，ruff 全绿，master 干净。**
+**当前状态：385 passed / 4 skipped，ruff 全绿，master 干净。**
 
 先读这三份，不要凭猜：
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
@@ -192,16 +192,19 @@ pytest 有 `pythonpath=["src"]` 兜底，但 **uvicorn 和 scripts/ 下的脚本
 
 ```
 make sync / db-up / db-reset / psql
-make test (358 passed / 4 skipped) / test-fast / test-nodb
+make test (385 passed / 4 skipped) / test-fast / test-nodb
 make demo / run(:8000, /docs)
 make bench (需 provider 的 API key) / bench-check (不花钱)
 make mcp / mcp-smoke
 make trace (开着 OTel 跑一次 demo，span 打到 stderr)
+make sandbox-image / sandbox-check [ARGS=--local]   容器沙箱 + 越狱对照
+make clone-check [ARGS="--repo owner/name"]          真的对着 github.com clone 一次
+make clean-repos                                     删 clone 缓存（可重建，但重建要几十秒）
 ```
 
 测试不联网不花 token（conftest 强制 scripted provider）。
 
-## 两个必须主动说明的诚实前提
+## 三个必须主动说明的诚实前提
 
 1. **`ScriptedLLM` 是确定性测试替身，不是 Agent**，只认识内置样例仓库。
    面试要主动说明，别等人发现。
@@ -214,9 +217,14 @@ make trace (开着 OTel 跑一次 demo，span 打到 stderr)
    **防御被证明有效**。剩下的边界：只测过一个模型、载荷只有 3 个、
    `file_content` 那条路依然防不住（刻意的，A/B 里它纹丝不动正好证明了这点）。
 
+3. **真的能 clone 陌生仓库了，但只在容器沙箱下**。
+   `REPOPILOT_SANDBOX=docker` 没开时，远端仓库的 run 会被 `Runner._prepare_repo`
+   直接拒掉（`require_sandbox_for_remote_repos`）—— 这是刻意的闸门，不是 bug。
+   剩下的边界：**沙箱镜像只预装了 pytest**，所以目前只接得住零依赖 / 纯 pytest
+   的仓库；clone 缓存的并发锁只在**进程内**；缓存不会淘汰。
+
 ## 开始
 
 先读 `README.md` + `docs/architecture.md` + `docs/progress.md`，跑 `make test-fast`
-确认环境正常，然后按【当前目标】格式推进**任务 1 的第一步：写一个能打穿
-当前这版代码的注入攻击 benchmark case**。先证明漏洞存在，再修。
+确认环境正常，然后按【当前目标】格式推进 `docs/progress.md` 的 NEXT 第一条。
 不要重构已有代码，除非有明确理由。

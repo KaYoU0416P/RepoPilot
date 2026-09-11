@@ -34,6 +34,69 @@
 
 ## NOW
 
+### Stage B 第二步（补做）— clone 目标仓库
+
+**做完之前，webhook 收到任何 Issue，Agent 都去修我们自己的 `fixtures/sample_repo`。**
+整条 GitHub 链路是通的，但接的是个假的目标。这一步把它接上真的。
+
+**两层目录，职责完全不同，不能混：**
+
+```
+.repos/<owner>/<repo>     上游的镜像。一个仓库一份，只读 + fetch，Agent 碰不到
+.workspaces/<run_id>/     每个 run 一份副本。Agent 在里面改，跑完就删
+```
+
+**★clone 不在 webhook 处理函数里做。** GitHub 对 webhook 的响应超时是 10 秒，
+clone 一个真实仓库远不止 —— 放进去就变成「每次都超时 → 每次都重投 →
+每次都重新 clone」。所以 webhook 只用**纯函数** `path_for()` 算出将来的路径写进
+`runs.repo_path`，真正的 clone 在 worker 领取任务时（`Runner._prepare_repo`）才做。
+
+**没有加数据库列。** 仓库地址本来就在 `external_ref`（`"owner/repo#42"`）里 ——
+发布链路一直这么用。`path_for` 是确定性的，入队时和执行时算出来的是同一个路径。
+
+**四个安全要点**（`src/repopilot/workspace/repos.py`）：
+
+1. **`owner/repo` 来自 payload，同时被拼成 URL 和文件系统路径。** 正则只放行
+   `[A-Za-z0-9_][A-Za-z0-9._-]*`，**首字符单独限制**是为了挡掉 `-` 开头 ——
+   那种名字会被 git 当成**选项**解析（`--upload-pack=...` 是已知的 RCE 面），
+   这不是路径问题而是**参数注入**。命令里还加了 `--` 终止符当第二道。
+2. **PAT 既不落盘也不进 argv。** 拼进 URL → git 写进 `.git/config` 留在磁盘上
+   （而缓存是长期目录）；`git -c http.extraheader=...` → argv **全机器可见**
+   （`ps aux`）。用 `GIT_CONFIG_COUNT/KEY_0/VALUE_0` 走环境变量，两样都避开。
+3. **★`require_sandbox_for_remote_repos`：没开容器沙箱就拒绝执行远端仓库。**
+   把 config 注释里那句警告变成代码里的闸门。**能被违反而不报错的安全约定
+   等于不存在。** 走 `RunFailed` 进终态、不重试 —— 配置问题重试一万次也一样。
+4. **clone 先写临时目录再原子改名。** 直接 clone 到最终路径的话，中途失败会留下
+   半份仓库，而 `is_cached` 只看 `.git` 在不在 —— 下一个 run 会拿着残缺仓库干活，
+   还查不出原因。**「失败要留下干净现场」比「失败要报错」更重要。**
+
+**顺带查出的洞：陌生仓库里的符号链接。**
+`shutil.copytree` 默认 `symlinks=False` —— 它**跟着链接走，把内容拷过来**。
+仓库里一个 `notes.txt -> /Users/you/.ssh/id_rsa` 会在 workspace 里变成一个
+**装着私钥的真文件**：`resolve()` 的越界检查完全看不见它，路径是合法的，
+内容早在拷贝那一刻就越界了。Agent 读得到，`git add -A` 还会收进 diff 进到 PR。
+改 `symlinks=True` 之后 `resolve()` 才真正生效；`iter_files()` 也把越界链接
+从文件树里摘掉（列出来等于主动指路）。
+**这条是 clone 陌生仓库之后才成立的威胁** —— 以前目标仓库是我们自己的。
+
+**实测踩到的坑：token 配错了，公开仓库也 clone 不下来。**
+第一版 `clone_check.py` 塞了个假 token「反正公开仓库不需要认证」，结果
+`remote: Invalid username or token`。只要发了 `Authorization` 头，GitHub 就按
+那个身份判，**不会因为仓库是公开的就退回匿名访问**。于是一个过期的 PAT 会让
+**所有** clone 一起挂，报错却像是仓库不存在。**发凭证不是免费的：错的凭证比
+不发凭证更糟。** 这句话现在写进了 `_auth_hint()` 的报错里，有测试钉着。
+
+**验收**（真的对着 github.com 跑）：
+
+```
+make clone-check      → 5 项全过（clone 1.2s / 复用+fetch 1.9s / 上游 .git 没被拷进 workspace /
+                                   不存在的仓库不留残骸）
+make test             → 385 passed / 4 skipped（+27）
+```
+
+新增 `scripts/clone_check.py`：单元测试里的"远端"是本机裸仓库走 `file://`，
+**认证、HTTPS、仓库不存在这三条路一条都没覆盖到**，这个脚本补的就是这一块。
+
 ### Stage D 第九步 — 容器沙箱（把「隔离」从应用层换成内核级）
 
 `sandbox/local.py` 的隔离是路径收敛 + 超时 + 杀进程组 —— **应用层**的，
@@ -499,11 +562,8 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
    现在只用 ScriptedLLM 验证过 harness 通，**没有真实分数**；
    三个注入 case 也**没跑过真模型**，所以现在只能说「设计了防护」，
    不能说「防护有效」。
-2. **Stage B 第二步**：clone 目标仓库。现在 webhook 入队时 `repo_path` 还是写死的
-   内置样例仓库；发布链路本身已经能处理真实 clone（`GitHubPublisher` 就是
-   `git clone repo_path` 起手的），补上 clone 这一步就直接通了。
-3. Docker sandbox 替换 `sandbox/local.py`（`run_command` 签名不变）。
-   **必须排在第 3 条之后立刻做** —— 一旦 clone 陌生仓库，就是在本机跑别人的测试。
+2. ~~**Stage B 第二步**：clone 目标仓库~~ → **已做**（见 NOW）。
+3. ~~Docker sandbox~~ → **已做**（见 NOW，Stage D 第九步）。
 4. **简历项目描述 + 面试 30 秒自述稿**。README 已经更新到位，但简历上那一段
    还没写。素材全在 `docs/learning.md`。
 5. **`docs/HANDOFF.md` 已严重过期**：还写着「Stage A 完成，75 passed，3 个
@@ -534,7 +594,10 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
 - webhook 的「登记投递」和「入队 run」**不在同一个事务里**。两者之间崩溃 →
   投递已记账、run 没建成、重投会被判重，事件就丢了。两张表在同一个库，
   技术上完全做得到一个事务，是刻意留的取舍。面试要主动讲这个缺口。
-- webhook 入队时 `repo_path` 还写死成内置样例仓库，没有真的 clone 目标仓库。
+- ~~webhook 入队时 `repo_path` 还写死成内置样例仓库~~ → **已做**（见 NOW）。
+  剩下的边界：clone 缓存的并发保护只在**进程内**（`asyncio.Lock`），多 worker
+  进程同时命中同一个仓库要换文件锁；缓存**不会淘汰**，长期跑要加容量上限；
+  只 clone 默认分支，接不了「在某个 branch/tag 上修」。
 - **只测过一个模型（DeepSeek-v4-pro）、3 轮。** 换模型结论可能完全不同；
   3 轮够看出稳不稳，不够给置信区间。
 - ~~注入 9/9 但没做对照~~ → **已做 A/B，防御被证明有效**（见 NOW 第五步）。

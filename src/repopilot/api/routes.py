@@ -37,6 +37,7 @@ from repopilot.github import (
 )
 from repopilot.observability import get_logger
 from repopilot.worker import DONE, EventBus
+from repopilot.workspace.repos import RepoCache, RepoError
 
 log = get_logger(__name__)
 
@@ -200,11 +201,29 @@ async def github_webhook(
             status="ignored", detail=f"未打 {settings.github_trigger_label} 标签或动作无关"
         )
 
+    # ---- 4.5：允许名单。第三道纵深（前两道是验签和标签），留空 = 不限。
+    allowlist = settings.github_repo_allowlist
+    if allowlist and trigger.repo_full_name not in allowlist:
+        return WebhookResponse(
+            status="ignored", detail=f"仓库不在允许名单里: {trigger.repo_full_name}"
+        )
+
     # ---- 5：入队。汇入和 POST /runs 完全相同的下游链路。
-    # 注意 repo_path 这里还是内置样例仓库 —— 真正 clone 目标仓库是 Stage B 第二步。
+    #
+    # ★`repo_path` 写的是**缓存里将来那个位置**，此刻它还不存在 ——
+    # clone 要等 worker 领取任务时才做。webhook 处理函数里绝不能 clone：
+    # GitHub 的响应超时是 10 秒，clone 一个真实仓库远不止，超时它会判失败并
+    # 重投，于是变成「每次都超时 → 每次都重投 → 每次都重新 clone」。
+    # `path_for` 是纯函数，入队时和执行时算出来的是同一个路径。
+    try:
+        repo_path = RepoCache(settings).path_for(trigger.repo_full_name)
+    except RepoError as exc:
+        log.warning("仓库名不合法，忽略: %s", exc)
+        return WebhookResponse(status="ignored", detail=str(exc))
+
     row = await runs_repo.create_run(
         task=trigger.to_task(),
-        repo_path=str(settings.sample_repo),
+        repo_path=str(repo_path),
         source="github_issue",
         external_ref=trigger.external_ref,
         max_attempts=settings.max_attempts,

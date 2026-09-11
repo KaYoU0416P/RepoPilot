@@ -129,6 +129,13 @@ class Settings(BaseSettings):
     #: ⚠️ **一旦开始 clone 陌生仓库，就必须切到 `docker`** —— 那时跑的是别人的
     #: 测试代码，应用层约束一条都拦不住 `import socket`。
     sandbox: Literal["local", "docker"] = "local"
+    #: ★把上面那句警告从注释变成**代码里的闸门**。
+    #:
+    #: 开着的时候，一个仓库是 clone 来的（= 不是本机上我们自己的代码）而
+    #: `sandbox != "docker"`，这个 run 直接失败，不会开跑。
+    #: 注释里的安全约定没人会记得，**能被违反而不报错的约定等于不存在**。
+    #: 关掉它只应该发生在「我确认这个仓库是我自己的」的本地调试里。
+    require_sandbox_for_remote_repos: bool = True
     #: 容器镜像。**必须预装目标仓库要的运行时** —— 容器是断网起的，
     #: 里面装不了任何东西。见 `docker/sandbox.Dockerfile`，`make sandbox-image` 构建。
     sandbox_image: str = "repopilot-sandbox:py312"
@@ -142,6 +149,12 @@ class Settings(BaseSettings):
     # --- Workspace ---
     workspace_root: Path = PROJECT_ROOT / ".workspaces"
     sample_repo: Path = PROJECT_ROOT / "fixtures" / "sample_repo"
+    #: clone 下来的上游镜像放哪。和 `.workspaces/` 是两回事：这里一个仓库一份、
+    #: 长期存在、只读 + fetch；那里一个 run 一份、Agent 在里面改、跑完就删。
+    repo_cache_root: Path = PROJECT_ROOT / ".repos"
+    #: clone / fetch 的墙钟超时。比 `publish_timeout_seconds` 还长 ——
+    #: 首次 clone 一个真实仓库是这条链路上最慢的一步。
+    clone_timeout_seconds: float = 300.0
 
     # --- 数据库 ---
     database_url: str = "postgresql://repopilot:repopilot@localhost:5433/repopilot"
@@ -176,6 +189,13 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""
     #: Issue 打上这个标签才算授权 Agent 动手。默认不响应任何 Issue。
     github_trigger_label: str = "repopilot"
+    #: 只允许这些仓库触发（`["owner/repo", ...]`，JSON）。**留空 = 不限**。
+    #:
+    #: 这里不 fail closed，和 `github_webhook_secret` 不一样，是刻意的：
+    #: 密钥留空意味着「验签逻辑形同虚设」，那必须拒；而允许名单留空时，
+    #: 授权依据仍然有两条 —— 验签通过（密钥是仓库所有者配的）+ Issue 上打了
+    #: 标签（打标签要写权限）。**它是第三道纵深，不是唯一那道。**
+    github_repo_allowlist: list[str] = []
     github_api_url: str = "https://api.github.com"
     #: push 的目标前缀，拼成 `<base>/<owner>/<repo>.git`。
     #: 测试里指向本地裸仓库，于是 clone/push 走的是真 git，只有 HTTP 被替换。
