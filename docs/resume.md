@@ -37,7 +37,7 @@
   非拍脑袋）；OpenTelemetry 三层 span（run / node / tool）；
   审批身份取自认证上下文而非请求体 —— **审计字段不能由被审计者自己填**。
 
-**403 个测试 / ruff 全绿 / 32 次提交，全部设计取舍与已知缺口写在 `docs/` 里。**
+**403 个测试 / ruff 全绿 / 33 次提交，全部设计取舍与已知缺口写在 `docs/` 里。**
 
 ---
 
@@ -231,9 +231,32 @@ trace 只导控制台没接 OTLP；webhook 的"登记投递"和"入队 run"不�
 
 ## 六、投递前的自检清单
 
-- [ ] 简历里每个数字都能说出**怎么测出来的**（89% / $0.0080 / 0→4/9 / 4→0）
-- [ ] 能在 5 分钟内本地起服务跑完一次 `Issue → 审批 → PR`（`make db-up && make run`）
-- [ ] `make sandbox-check` 和 `make sandbox-check ARGS=--local` 跑得出对照 —— **这是现场演示的最佳素材**
-- [ ] GitHub 仓库 README 第一屏就有链路图和「不信任模型输出」那张表
-- [ ] `.env` 没有被提交（已 gitignore，确认一次）
-- [ ] 面试前重读 `docs/learning.md` 的小标题（不用读正文，标题就是索引）
+**全部做完（2026-09-11）。** 证据在 [`docs/evidence/`](evidence/)，每份都带重跑命令。
+
+- [x] **简历里每个数字都能说出怎么测出来的** → [`docs/evidence/`](evidence/) 四份存档，
+      README 第一屏就是「实测结论」表（数字 + 怎么复现 + 存档链接）。
+      ⚠️ 查出一个问题：89% 那次跑的 `--json` 报表没留存，仓库里的
+      `bench-report.json` 其实是更早一次**单轮**跑的（14/18）。已在存档里写明。
+- [x] **5 分钟内跑完 `Issue → 审批 → PR`** → `make demo-flow`，**热启动 4 秒**
+      （冷启动约 70 秒，大头是等 Postgres）。签名 webhook → 验签 → 幂等 →
+      clone → 容器沙箱 → 审批闸门 → 发布，14 条断言。
+      ⚠️ 跑它**查出一个真 bug**：开发库缺 `branch`/`pr_url` 两列，
+      审批后永远卡在 `publishing`。403 个测试全绿掩盖了它（测试库会自愈重建）。
+- [x] **`make sandbox-check` 对照跑得出** → [存档](evidence/sandbox-isolation.md)，
+      越狱 **4 项 → 0 项**。⚠️ 顺手修了探针的一个缺陷：容器里 `HOME=/tmp`，
+      `expanduser("~/.ssh")` 会漂成 `/tmp/.ssh`，两组测的**不是同一个路径**。
+- [x] **README 第一屏有链路图和「不信任模型输出」表** → 重排了：
+      链路图 → 实测结论 → 不信任模型输出 → 快速开始。安装步骤不该排在论点前面。
+- [x] **`.env` 没有被提交** → 全历史只出现过 `.env.example`；
+      所有 blob 里都没有 `sk-` / `ghp_` 特征串。
+- [x] **`docs/learning.md` 有目录** → 30 个大节 / 49 个要点，扫标题就够。
+
+### 面试现场跑哪两条
+
+```bash
+make demo-flow                       # 4 秒，全链路 + 审批闸门 + 审计防伪造
+make sandbox-check ARGS=--local      # 十几秒，当场看到 .env 被读走
+make sandbox-check                   # 同一份探针，容器里全拦住
+```
+
+**都不花钱、都确定性。** 评测那条别现场跑（40 分钟）—— 给存档看。

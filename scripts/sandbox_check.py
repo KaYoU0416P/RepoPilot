@@ -16,14 +16,18 @@ import sys
 import tempfile
 from pathlib import Path
 
-from repopilot.config import get_settings
+from repopilot.config import PROJECT_ROOT, get_settings
 from repopilot.observability import setup_logging
 
 #: 丢进沙箱去跑的探针。每个函数试一种越狱，打印 BLOCKED 或 ESCAPED。
 PROBE = '''
 import os, socket, sys
 
-HOST_ONLY = ("/Users", os.path.expanduser("~/.ssh"), "/Users/kayou/Documents/py_agent/.env")
+#: ★这几条路径由**宿主机**算好再字面量插进来，探针里绝不写 `expanduser`。
+#: 踩过：容器里 `HOME=/tmp`，`expanduser("~/.ssh")` 会变成 `/tmp/.ssh` ——
+#: 于是两组跑的根本不是同一个路径，"看不见"当然看不见，它压根不存在。
+#: **对照实验的两组必须只差被测的那一个变量**，路径这种东西不能让它跟着环境漂。
+HOST_ONLY = __HOST_ONLY__
 
 
 def test_network():
@@ -86,9 +90,18 @@ async def main() -> int:
     setup_logging()
     settings = get_settings()
 
+    # 在**宿主机**上算好"只有宿主机才有"的那几条路径，再字面量塞进探针。
+    # 两组跑的必须是同一批绝对路径，否则对照不成立 —— 见 PROBE 里的注释。
+    host_only = (
+        "/Users" if sys.platform == "darwin" else str(Path.home().parent),
+        str(Path.home() / ".ssh"),
+        str(PROJECT_ROOT / ".env"),
+    )
+    probe = PROBE.replace("__HOST_ONLY__", repr(host_only))
+
     with tempfile.TemporaryDirectory(prefix="sandbox-check-") as tmp:
         workdir = Path(tmp)
-        (workdir / "test_probe.py").write_text(PROBE, encoding="utf-8")
+        (workdir / "test_probe.py").write_text(probe, encoding="utf-8")
 
         command = [sys.executable, "-m", "pytest", "-q", "-s", "--no-header",
                    "-p", "no:cacheprovider"]

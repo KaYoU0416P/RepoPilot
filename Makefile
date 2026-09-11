@@ -1,4 +1,4 @@
-.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace sandbox-image sandbox-check clone-check clean clean-repos
+.PHONY: sync db-up db-down db-reset psql test test-fast test-nodb bench bench-check mcp mcp-smoke lint fmt run demo trace sandbox-image sandbox-check clone-check demo-flow clean clean-repos
 
 # uv 在这台机器上写出来的 .pth 带 macOS UF_HIDDEN 标志，而 CPython 的 site.py
 # 会静默跳过隐藏的 .pth -> import repopilot 失败。详见 docs/failures.md。
@@ -41,8 +41,9 @@ test-nodb: sync
 # 跑 18 个 case（15 seeded bug + 3 注入），出成功率 / 成本 / 重试 / 失败原因报表。
 # 选中的 provider 没有 key 时会降级到 ScriptedLLM，那时分数没有意义，
 # 只能验证 harness 通不通 —— 脚本自己会警告。
+# 加 ARGS 透传：make bench ARGS="--repeat 3"  / ARGS="--only off-by-one"
 bench: sync
-	uv run python scripts/bench.py --json bench-report.json
+	uv run python scripts/bench.py --json bench-report.json $(ARGS)
 
 # 只体检评测集本身：每个 case 的 bug 是不是真的种进去了、
 # 参考答案能不能过隐藏测试。不调 LLM，不花钱。
@@ -101,6 +102,13 @@ sandbox-check: sync
 # 认证 / HTTPS / 仓库不存在 这三条路它一条都没覆盖到。
 clone-check: sync
 	uv run --no-sync python scripts/clone_check.py $(ARGS)
+
+# ------------------------------------------------------------------ 演示
+# 端到端：签名的 Issue → 验签入队 → clone → 容器沙箱 → 审批闸门 → 发布。
+# 默认 ScriptedLLM，不花钱，热启动约 5 秒。面试现场跑这个。
+# LLM=deepseek make demo-flow  走真模型。
+demo-flow: sync
+	./scripts/demo_flow.sh
 
 clean:
 	rm -rf .workspaces .pytest_cache .ruff_cache

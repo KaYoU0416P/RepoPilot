@@ -31,6 +31,7 @@ Python 我基本零基础，讲解要用**大白话 + Java 对照**。IDE 是 VS
 先读这三份，不要凭猜：
 - `docs/resume.md` — **简历那一段 + 30 秒自述 + 10 个深挖问答**。
   想知道"这个项目哪些点是拿得出手的"，看这份最快。
+- `docs/evidence/` — 简历上每个数字的**实测存档**，每份带重跑命令和花费。
 - `README.md` — 全貌、链路图、设计要点、诚实的缺口清单（已更新到最新）
 - `docs/architecture.md` — 主调用链、模块职责、状态机、可靠性机制
 - `docs/progress.md` — DONE / NOW / NEXT / 已知缺口
@@ -199,6 +200,7 @@ make demo / run(:8000, /docs)
 make bench (需 provider 的 API key) / bench-check (不花钱)
 make mcp / mcp-smoke
 make trace (开着 OTel 跑一次 demo，span 打到 stderr)
+make demo-flow                                       ★端到端：Issue→审批→PR，4 秒，不花钱
 make sandbox-image / sandbox-check [ARGS=--local]   容器沙箱 + 越狱对照
 make clone-check [ARGS="--repo owner/name"]          真的对着 github.com clone 一次
 make clean-repos                                     删 clone 缓存（可重建，但重建要几十秒）
