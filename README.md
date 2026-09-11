@@ -68,15 +68,15 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 **刻意没有通用 shell 工具**。唯一的执行类工具是 `run_tests`，命令行写死。
 有了 shell，上面所有限制都变成装饰品。
 
-
 ## 快速开始
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
+make demo-flow     # ★端到端：签名 Issue → 验签 → clone → 沙箱 → 审批闸门 → 发布
+make sandbox-check ARGS=--local   # ★对照组：看着模型代码读走 .env 里的 key
 make test          # 403 passed / 4 skipped
-make demo          # 单跑一次 Agent，不用起服务、不用 API key
+make demo          # 单跑一次 Agent，不起服务
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
-make mcp-smoke     # 打一轮 MCP stdio 握手
 make bench-check   # 体检评测基准集（不调 LLM、不花钱）
 ```
 
@@ -678,7 +678,7 @@ uv run python scripts/mcp_server.py --repo /path/to/repo   # 配置见文件头�
 `Workspace`。换一个协议入口，一行防护代码都不用重写——这是当初把横切关注点
 收敛进注册表的回报。
 
-## 目录
+## 目录结构
 
 ```
 src/repopilot/
@@ -699,8 +699,9 @@ src/repopilot/
 db/schema.sql             3 张表：runs / webhook_deliveries / approvals
 benchmarks/cases/         18 个 case（15 seeded bug + 3 注入）+ 隐藏测试 + 参考答案
 fixtures/sample_repo/     演示与测试用的目标仓库
-scripts/                  demo / bench / mcp_server / sandbox_check / clone_check
+scripts/                  demo_flow(端到端) / bench / sandbox_check / clone_check / ab_injection / mcp_server
 docs/                     架构、进度、面试笔记、故障复盘、简历与面试稿
+docs/evidence/            ★实测存档：每个数字的出处 + 重跑命令
 docs/guide/               小白完全版教程（语法、内核、框架、主线逐行）
 ```
 
