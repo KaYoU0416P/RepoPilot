@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from repopilot.api.routes import router
+from repopilot.api.routes import public, router
 from repopilot.config import get_settings
 from repopilot.db import close_pool, init_pool
 from repopilot.observability import get_logger, setup_logging, setup_tracing
@@ -44,6 +44,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.worker_task = asyncio.create_task(worker.run_forever(), name="worker")
         log.info("worker 已随 API 进程启动 (enable_worker=true)")
 
+    # 鉴权是 fail closed 的：没配 key = 所有业务接口 401。那本身是对的，
+    # 但**沉默地对**会让人对着一片 401 查上半天。启动时就喊出来。
+    if not settings.api_keys:
+        log.warning(
+            "没有配置 REPOPILOT_API_KEYS —— 除 /health 和 /webhooks/github 外"
+            "所有接口都会返回 401。本地开发请在 .env 里配一把（见 .env.example）"
+        )
+    else:
+        log.info(
+            "API 鉴权已启用 | %s",
+            ", ".join(f"{k.name}({'+'.join(k.scopes)})" for k in settings.api_keys),
+        )
+
     log.info(
         "RepoPilot 就绪 | provider=%s model=%s db=%s trace=%s",
         settings.llm_provider,
@@ -67,6 +80,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="RepoPilot", version="0.2.0", lifespan=lifespan)
+    # 顺序不影响路由匹配，但**先列公开的**是刻意的：读这个文件的人
+    # 第一眼看到的应该是"哪些接口不用鉴权"，而不是去数哪些用了。
+    app.include_router(public)
     app.include_router(router)
     return app
 

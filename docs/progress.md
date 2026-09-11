@@ -34,6 +34,64 @@
 
 ## NOW
 
+### Stage E — API 鉴权（默认拒绝 + 审批单独一个权限位）
+
+做完之前，`POST /runs` 和 `POST /approval` 谁都能调。webhook 那条路验签严得很，
+**自己的 HTTP 接口反而是裸的** —— 一个项目里两条入口的安全水位差这么多，
+本身就是个信号。
+
+**Bearer token，刻意不做 OAuth。** 调用方是 CI 机器人和少数几个人，不是
+"任意第三方应用代表用户访问"（那才是 OAuth 要解决的问题）。上 OAuth 只会引入
+一个授权服务器、一堆回调、和一个我讲不清楚的登录流程。
+**认证方案要配得上威胁模型，不是越重越好。**
+
+**★默认拒绝，挂在 router 上不是逐个路由加。**
+`APIRouter(dependencies=[Depends(require_scope("run"))])`。逐个加注解的失败形态是
+「新写了个接口忘了加 → 它是公开的」，**而且不会有任何报错**。要公开就必须显式写进
+另一个 `public` router（现在只有 `/health` 和 `/webhooks/github`，一眼数得清）。
+Java 对照：Spring Security 写 `anyRequest().authenticated()` + 显式 `permitAll()`
+白名单，而不是满代码撒 `@PreAuthorize`。
+
+配套的测试**不手写接口清单**，而是遍历 `app.openapi()["paths"]` 挨个打一遍匿名请求 ——
+手写的清单会跟着新接口一起过期，而**过期的安全测试比没有测试更糟**。
+
+**★审批要单独的权限位。** 整个项目的核心论点是「Agent 说成功不算数，要人批准」。
+如果开 run 的那把 key 也能批准自己开的 run，**这道闸门就是装饰品**。
+CI 机器人拿 `run`，人拿 `run,approve`。**权限模型要长得像业务约束。**
+
+**★`decided_by` 取自认证出来的身份，不取请求体。**
+以前它是 `ApprovalRequest` 里的一个字段 —— 审批流水上"谁批的"是**被审计的人
+自己填的**，随手写 "the CTO" 就行。那不是审计，是留言板。
+**审计字段绝不能由被审计者提供。**
+
+三个小但有讲究的决定：
+
+- **fail closed**：一把 key 都没配 = 拒绝所有，不是"没配就不鉴权"。和
+  `github_webhook_secret` 同一条规矩。配套在启动日志里喊一嗓子 ——
+  fail closed 是对的，但**沉默地对**会让人对着一片 401 查半天。
+- **401 vs 403**：没身份 → 401 + `WWW-Authenticate`（RFC 9110 要求）；
+  有身份但没权限 → 403。混在一起，调用方分不清该去拿 key 还是该去要权限。
+  （所以没用 fastapi 的 `HTTPBearer`：它缺 header 时抛 403。）
+- **401 的响应体对外统一**："服务端没配 key"和"你的 key 不对"是同一句话，
+  否则 401 本身就成了一个探测接口。详细原因只进日志。
+  **报错要对运维详细、对外部统一。**
+
+比较用 `hmac.compare_digest` 且**不短路**：`==` 泄露"前几位对上了"，
+而循环里 `if match: return` 会从耗时里泄露"匹配到第几把 key"——
+后者弱得多，但代价只是少写一个 `return`。
+
+**验收**（真 HTTP，不是 ASGI 直连）：
+
+```
+GET  /health              无 key   → 200
+GET  /runs                无 key   → 401 + WWW-Authenticate: Bearer
+GET  /runs                错 key   → 401（响应体和上面一模一样）
+POST /approval            ci-bot   → 403 这把 key 没有 'approve' 权限（它有：run）
+POST /approval            kayou，body 里冒充 "the CTO" → 200
+GET  /approvals                     → "decided_by": "kayou"      ★伪造没生效
+make test                           → 403 passed / 4 skipped（+18）
+```
+
 ### Stage B 第二步（补做）— clone 目标仓库
 
 **做完之前，webhook 收到任何 Issue，Agent 都去修我们自己的 `fixtures/sample_repo`。**
@@ -585,7 +643,10 @@ README / progress / HANDOFF 三处都改了。这种数字面试官会数。
   ⚠️ **一旦开始 clone 陌生仓库就必须切到 `docker`**。剩下的边界：镜像里只预装了
   pytest，接任意仓库还需要一个「按 requirements 联网装依赖」的构建阶段，
   而那一步本身也在跑别人的代码（setup.py / build hook），需要单独隔离。
-- API 没有鉴权。
+- ~~API 没有鉴权~~ → **已做**（见 NOW）。剩下的边界：**key 是明文存在配置里的**，
+  没有轮转、没有吊销列表、没有"上次使用时间"；真要做得把 key 落库存哈希。
+  浏览器的 `EventSource` 设不了 Authorization 头，所以 SSE 那个接口目前只有
+  curl / `fetch` 能用。也没有限流 —— 一把泄露的 key 可以无限刷 run（烧钱）。
 - 发布链路**只在本地裸仓库上验证过**（测试用裸仓库当远端，git 那半边是真的，
   GitHub API 那半边是 `httpx.MockTransport`）。没打过真实 GitHub 的 API。
 - publisher 的重试**没有次数上限**：`PublishError` 会直接进终态，但如果每次都是

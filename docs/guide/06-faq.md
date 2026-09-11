@@ -414,7 +414,7 @@ docker images | grep pgvector      # 确认本机有这个镜像
 ```bash
 make sync      # 装依赖（永远用这个）
 make db-up     # 起 PG（会等到真的能连）
-make test      # 385 passed
+make test      # 403 passed
 make test-nodb # 不需要数据库的那部分
 make demo      # 单跑一次 Agent，不起服务不用 key
 make run       # uvicorn :8000，/docs 有 Swagger
@@ -425,19 +425,34 @@ make db-reset  # 改了 schema.sql 之后删库重建
 ## 完整业务链路演示（面试可以现场跑）
 
 ```bash
-RID=$(curl -s -X POST localhost:8000/runs -H 'content-type: application/json' \
+# .env.example 里那两把 dev key。CI 只有 run，人有 run+approve。
+CI=rp_dev_ci_0000000000000000
+HU=rp_dev_human_00000000000
+
+RID=$(curl -s -X POST localhost:8000/runs \
+  -H "Authorization: Bearer $CI" -H 'content-type: application/json' \
   -d '{"task":"Fix divide() so dividing by zero raises ValueError"}' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
 
-curl -sN localhost:8000/runs/$RID/events                      # SSE，每个节点一帧
-curl -s  localhost:8000/runs/$RID | python3 -m json.tool      # → pending_approval
+curl -sN localhost:8000/runs/$RID/events -H "Authorization: Bearer $CI"   # SSE
+curl -s  localhost:8000/runs/$RID -H "Authorization: Bearer $CI" | python3 -m json.tool
+
+# ★现场演示的高光：开 run 的那把 key 批不了自己开的 run
+curl -s -X POST localhost:8000/runs/$RID/approval \
+  -H "Authorization: Bearer $CI" -H 'content-type: application/json' \
+  -d '{"decision":"approved"}'
+# → 403 这把 key 没有 'approve' 权限（它有：run）
 
 curl -s -X POST localhost:8000/runs/$RID/approval \
-  -H 'content-type: application/json' \
-  -d '{"decision":"approved","decided_by":"me","reason":"diff 看过了"}'   # → publishing
+  -H "Authorization: Bearer $HU" -H 'content-type: application/json' \
+  -d '{"decision":"approved","reason":"diff 看过了"}'                     # → publishing
+
+# 审批流水里的 decided_by 是**认证出来的身份**，请求体伪造不了
+curl -s localhost:8000/runs/$RID/approvals -H "Authorization: Bearer $CI" | python3 -m json.tool
 
 curl -s -X POST localhost:8000/runs/$RID/approval \
-  -H 'content-type: application/json' -d '{"decision":"approved","decided_by":"me"}'
+  -H "Authorization: Bearer $HU" -H 'content-type: application/json' \
+  -d '{"decision":"approved"}'
 # → 409，不能批准两次
 ```
 

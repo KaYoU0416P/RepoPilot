@@ -1333,18 +1333,26 @@ finally:
 
 ```bash
 curl -X POST localhost:8000/runs/$RID/approval \
-  -H 'content-type: application/json' \
-  -d '{"decision":"approved","decided_by":"me","reason":"diff 看过了"}'
+  -H "Authorization: Bearer $HU" -H 'content-type: application/json' \
+  -d '{"decision":"approved","reason":"diff 看过了"}'
 ```
 
 ```python
-# src/repopilot/api/routes.py:115
-@router.post("/runs/{run_id}/approval", response_model=RunResponse)
-async def decide_approval(run_id: UUID, body: ApprovalRequest) -> RunResponse:
+# src/repopilot/api/routes.py
+@router.post("/runs/{run_id}/approval", response_model=RunResponse,
+             # ★单独的权限位，不是 router 默认的 "run"。开 run 的那把 key
+             # 能批准自己开的 run 的话，这道闸门就是装饰品。
+             dependencies=[Depends(require_scope("approve"))])
+async def decide_approval(run_id: UUID, body: ApprovalRequest,
+                          principal: Principal = Depends(require_scope("approve"))):
     await _require(run_id)
     try:
         await approvals_repo.decide(run_id, decision=body.decision,
-                                    decided_by=body.decided_by, reason=body.reason)
+                                    # ★取**认证出来的身份**，不取请求体。
+                                    # 以前它是 body.decided_by —— 审批流水上
+                                    # "谁批的"是被审计的人自己填的，随手写
+                                    # "CTO" 就行。那不是审计，是留言板。
+                                    decided_by=principal.name, reason=body.reason)
     except InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

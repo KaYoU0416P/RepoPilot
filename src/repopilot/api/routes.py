@@ -2,6 +2,11 @@
 
 处理函数保持很薄：校验 → 调仓储/服务 → 组装响应。
 业务规则在 domain/ 和 db/ 里，不在这里。
+
+**两个 router，不是一个**：`public`（探活 + webhook）和 `router`（其余全部，
+默认要 `run` 权限）。分开不是为了好看 —— 鉴权挂在 router 上而不是逐个路由加，
+**新写的接口默认就是受保护的**。逐个加注解的失败形态是"忘了加 → 它是公开的"，
+而这种漏洞不会有任何报错。要公开就必须显式写进 `public`，一眼数得清。
 """
 
 import asyncio
@@ -13,6 +18,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from repopilot.api.auth import Principal, require_scope
 from repopilot.api.schemas import (
     ApprovalRequest,
     CreateRunRequest,
@@ -41,7 +47,15 @@ from repopilot.workspace.repos import RepoCache, RepoError
 
 log = get_logger(__name__)
 
-router = APIRouter()
+#: 不需要 API key 的接口。**只有这两个，改动要慎重。**
+#: - `/health`：探活。让负载均衡器先拿一把 key 才能判活，是在给自己挖坑。
+#:   所以它**只报够用的信息**，不带版本号、不带连接串、不带队列细节以外的东西。
+#: - `/webhooks/github`：它有**自己的**认证（HMAC 验签），而且 GitHub 那边
+#:   没法配 Authorization 头 —— 给它加 API key 只会把真正的调用方挡在外面。
+public = APIRouter()
+
+#: 其余全部。默认要 `run` 权限 —— **新加的路由自动受保护**。
+router = APIRouter(dependencies=[Depends(require_scope("run"))])
 
 
 def get_bus(request: Request) -> EventBus:
@@ -49,7 +63,7 @@ def get_bus(request: Request) -> EventBus:
 
 
 # ------------------------------------------------------------------ health
-@router.get("/health", response_model=HealthResponse)
+@public.get("/health", response_model=HealthResponse)
 async def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
     try:
         depth = await runs_repo.queue_depth()
@@ -113,15 +127,35 @@ async def cancel_run(run_id: UUID) -> RunResponse:
 
 
 # ---------------------------------------------------------------- approval
-@router.post("/runs/{run_id}/approval", response_model=RunResponse)
-async def decide_approval(run_id: UUID, body: ApprovalRequest) -> RunResponse:
+@router.post(
+    "/runs/{run_id}/approval",
+    response_model=RunResponse,
+    # ★这一个接口要**单独的**权限位，不是 router 默认的 `run`。
+    # 整个项目的核心论点是"Agent 自己说成功不算数，要人批准"。
+    # 如果开 run 的那把 key 也能批准自己开的 run，**这道闸门就是装饰品**。
+    # CI 机器人拿 `run`，人拿 `run,approve` —— 权限模型要长得像业务约束。
+    dependencies=[Depends(require_scope("approve"))],
+)
+async def decide_approval(
+    run_id: UUID,
+    body: ApprovalRequest,
+    principal: Principal = Depends(require_scope("approve")),
+) -> RunResponse:
     """人工审批闸门。只有 pending_approval 的 run 能被批准/驳回。"""
     await _require(run_id)
     try:
         await approvals_repo.decide(
             run_id,
             decision=body.decision,
-            decided_by=body.decided_by,
+            # ★`decided_by` 取**认证出来的身份**，不取请求体。
+            #
+            # 以前它是 `body.decided_by` —— 也就是说审批流水上那句"谁批的"
+            # 是**被审计的人自己填的**，随手写 "CTO" 就行。那不是审计，是留言板。
+            # 一个只有人能看的字段，和一个能作为证据的字段，差别就在这一行。
+            #
+            # 通用结论：**审计字段绝不能由被审计者提供。** 谁、什么时候，
+            # 都得由服务端从已验证的上下文里取。
+            decided_by=principal.name,
             reason=body.reason,
         )
     except InvalidTransition as exc:
@@ -138,7 +172,7 @@ async def approval_history(run_id: UUID) -> list[dict]:
 
 
 # ----------------------------------------------------------------- webhook
-@router.post("/webhooks/github", response_model=WebhookResponse)
+@public.post("/webhooks/github", response_model=WebhookResponse)
 async def github_webhook(
     request: Request,
     response: Response,

@@ -26,6 +26,19 @@ class ModelPricing(BaseModel):
     cache_read_multiplier: float = 0.1
 
 
+class ApiKeyConfig(BaseModel):
+    """一把 API key 和它的权限位。
+
+    `scopes` 分两档不是为了看起来正规，是因为**审批闸门要求批准的人和
+    发起的人可以不是同一个**。CI 机器人拿 `run`，人拿 `run` + `approve`。
+    同一把 key 既能开 run 又能批准自己开的 run，那道闸门就是装饰品。
+    """
+
+    key: str = Field(min_length=16, description="密钥本身。至少 16 字符，别用 'test'")
+    name: str = Field(min_length=1, description="谁在用。会被写进审批流水，所以要认得出")
+    scopes: list[Literal["run", "approve"]] = ["run"]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="REPOPILOT_",
@@ -180,6 +193,17 @@ class Settings(BaseSettings):
     #: 平时开发时噪音太大；`make trace` 会临时打开它。
     otel_enabled: bool = False
     otel_service_name: str = "repopilot"
+
+    # --- API 鉴权 ---
+    #: 调用方的 key 列表，JSON：
+    #:
+    #:     REPOPILOT_API_KEYS='[{"key":"rp_...","name":"kayou","scopes":["run","approve"]}]'
+    #:
+    #: **留空 = 拒绝所有业务接口**（fail closed），不是"留空就不鉴权"。
+    #: 和 `github_webhook_secret` 同一条规矩：默认放行的开关是最典型的生产事故。
+    #: `/health` 和 `/webhooks/github` 不受影响 —— 前者是探活，后者有自己的
+    #: HMAC 验签（用 API key 保护它反而会挡掉 GitHub）。
+    api_keys: list[ApiKeyConfig] = []
 
     # --- GitHub（Stage B）---
     #: PAT。开 PR / 回写评论用，不碰 OAuth。

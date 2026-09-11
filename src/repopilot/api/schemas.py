@@ -24,8 +24,14 @@ class CreateRunResponse(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
+    """★注意这里**没有** `decided_by`。
+
+    它以前有，也就是说审批流水上"谁批的"是被审计的人自己填的 ——
+    随手写个 "CTO" 就行。现在它取自认证出来的身份（`routes.py`）。
+    **审计字段绝不能由被审计者提供。**
+    """
+
     decision: Literal["approved", "rejected"]
-    decided_by: str = Field(min_length=1)
     reason: str | None = None
 
 

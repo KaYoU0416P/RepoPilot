@@ -35,33 +35,50 @@ POST /runs ─────▶ [runs 表 queued]  ← 队列和业务表是同一
 
 ```bash
 make db-up         # 起 Postgres（端口 5433）
-make test          # 385 passed / 4 skipped
+make test          # 403 passed / 4 skipped
 make demo          # 单跑一次 Agent，不用起服务、不用 API key
 make run           # uvicorn :8000，浏览器开 /docs 有 Swagger UI
 make mcp-smoke     # 打一轮 MCP stdio 握手
 make bench-check   # 体检评测基准集（不调 LLM、不花钱）
 ```
 
-不需要 API key。选中的 provider 没有对应的 key 时自动降级到 `ScriptedLLM`
-（确定性测试替身，只认识内置样例仓库）。配 `.env` 后走真实模型 ——
+不需要模型 API key 也能跑：选中的 provider 没有对应的 key 时自动降级到
+`ScriptedLLM`（确定性测试替身，只认识内置样例仓库）。配 `.env` 后走真实模型 ——
 支持 **Anthropic** 和 **DeepSeek**（便宜一个数量级），见 `.env.example`。
+
+⚠️ 但 **HTTP 接口要 `REPOPILOT_API_KEYS`**（那是另一回事：调用方的身份）。
+没配 = 除 `/health` 外全部 401。`make demo` / `make test` 不走 HTTP，不受影响。
 
 ### 跑一次完整业务链路
 
+除 `/health` 和 `/webhooks/github` 外都要 API key。**没配 key = 全部 401**
+（fail closed，不是"没配就不鉴权"）。先在 `.env` 里配两把，见 `.env.example`：
+
 ```bash
-RID=$(curl -s -X POST localhost:8000/runs -H 'content-type: application/json' \
+CI=rp_dev_ci_0000000000000000       # scopes: run
+HU=rp_dev_human_00000000000         # scopes: run, approve
+
+RID=$(curl -s -X POST localhost:8000/runs \
+  -H "Authorization: Bearer $CI" -H 'content-type: application/json' \
   -d '{"task":"Fix divide() so dividing by zero raises ValueError"}' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
 
-curl -sN localhost:8000/runs/$RID/events        # SSE，每个节点一帧
-curl -s  localhost:8000/runs/$RID | python3 -m json.tool   # → pending_approval
+curl -sN localhost:8000/runs/$RID/events -H "Authorization: Bearer $CI"   # SSE
+curl -s  localhost:8000/runs/$RID -H "Authorization: Bearer $CI" | python3 -m json.tool
+
+# ★开 run 的那把 key 批不了自己开的 run
+curl -s -X POST localhost:8000/runs/$RID/approval \
+  -H "Authorization: Bearer $CI" -H 'content-type: application/json' \
+  -d '{"decision":"approved"}'
+# → 403 {"detail":"这把 key 没有 'approve' 权限（它有：run）"}
 
 curl -s -X POST localhost:8000/runs/$RID/approval \
-  -H 'content-type: application/json' \
-  -d '{"decision":"approved","decided_by":"me","reason":"diff 看过了"}'   # → publishing
+  -H "Authorization: Bearer $HU" -H 'content-type: application/json' \
+  -d '{"decision":"approved","reason":"diff 看过了"}'          # → publishing
 
 curl -s -X POST localhost:8000/runs/$RID/approval \
-  -H 'content-type: application/json' -d '{"decision":"approved","decided_by":"me"}'
+  -H "Authorization: Bearer $HU" -H 'content-type: application/json' \
+  -d '{"decision":"approved"}'
 # → 409，不能批准两次
 ```
 
@@ -207,6 +224,39 @@ notes.txt -> /Users/you/.ssh/id_rsa
 
 **这条是 clone 陌生仓库之后才成立的威胁**：以前的"目标仓库"是我们自己的
 `fixtures/sample_repo`，里面不会有恶意链接。
+
+### API 鉴权：默认拒绝 + 审批单独一个权限位
+
+Bearer token，**刻意不做 OAuth** —— 调用方是 CI 机器人和少数几个人，
+不是"任意第三方应用代表用户访问"。**认证方案要配得上威胁模型，不是越重越好。**
+
+| | 做法 | 为什么 |
+|---|---|---|
+| 挂在哪 | `APIRouter(dependencies=[...])`，不是逐个路由加 | 逐个加的失败形态是「新接口忘了加 → 它是公开的」，**而且不会报错** |
+| 公开的接口 | 只有 `/health` 和 `/webhooks/github`，在**另一个** router 里 | 要公开必须显式写进去，一眼数得清 |
+| 没配 key | **拒绝所有**（fail closed） | 和 webhook 验签同一条规矩 |
+| 比较 | `hmac.compare_digest`，且**不短路** | `==` 的耗时泄露"前几位对上了" |
+| 401 vs 403 | 没身份 → 401 + `WWW-Authenticate`；有身份没权限 → 403 | 混在一起，调用方分不清该去拿 key 还是该去要权限 |
+| 401 的响应体 | "没配 key"和"key 不对"**对外是同一个** | 否则 401 本身成了探测接口。详细原因只进日志 |
+
+**★审批要单独的权限位。** 整个项目的核心论点是「Agent 说成功不算数，要人批准」。
+如果开 run 的那把 key 也能批准自己开的 run，**这道闸门就是装饰品**。
+CI 机器人拿 `run`，人拿 `run,approve`。**权限模型要长得像业务约束。**
+
+**★`decided_by` 取自认证出来的身份，不取请求体。**
+以前它是请求体里的一个字段 —— 审批流水上"谁批的"是**被审计的人自己填的**，
+随手写 "the CTO" 就行。那不是审计，是留言板。实测（真 HTTP，不是 ASGI 直连）：
+
+```
+POST /approval  body: {"decision":"approved","decided_by":"the CTO"}   → 200
+GET  /approvals                                    → "decided_by": "kayou"
+```
+
+**审计字段绝不能由被审计者提供。**
+
+> **已知缺口**：浏览器的 `EventSource` **不能设 Authorization 头**，
+> 所以 SSE 那个接口目前只有 curl / `fetch` 能用。要支持浏览器得发一个
+> 短期一次性 token 走 query —— 那会把 token 漏进访问日志，所以先不做。
 
 ### 不信任进程活着
 
@@ -645,7 +695,7 @@ docs/guide/               小白完全版教程（语法、内核、框架、主
 Postgres 业务层（队列 + 幂等 + 审批闸门）、租约与两层限流、8 状态表驱动状态机、
 SSE、优雅停机、GitHub 全链路（webhook 验签 → 入队 → 开 PR → 回写评论）、
 18 个 case 的评测基准集、MCP server、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪。**385 passed / 4 skipped，ruff 全绿。**
+OpenTelemetry 链路追踪。**403 passed / 4 skipped，ruff 全绿。**
 
 **未完成 / 已知缺口**（诚实列出，详见 [docs/progress.md](docs/progress.md)）：
 
@@ -667,4 +717,3 @@ OpenTelemetry 链路追踪。**385 passed / 4 skipped，ruff 全绿。**
 - 事件总线是进程内的，拆多进程需换 Redis pub/sub 或 PG `LISTEN/NOTIFY`。
 - **trace 只导到控制台**，没接 OTLP / Jaeger；用的是同步的 `SimpleSpanProcessor`，
   长期开着会拖慢主流程。HTTP 入口和数据库调用还没埋点，只有 trace 没有 metrics。
-- API 没有鉴权。

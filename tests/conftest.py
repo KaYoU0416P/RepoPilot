@@ -98,27 +98,54 @@ async def db():
         await close_pool()
 
 
+#: 测试用的两把 key。**两把不是一把**，因为审批要单独的权限位：
+#: 开 run 的 key 能批准自己开的 run 的话，审批闸门就是装饰品。
+CI_KEY = "test-key-ci-bot-0000000000"  # 只有 run
+APPROVER_KEY = "test-key-approver-00000000"  # run + approve
+
+
+def _test_api_keys():
+    from repopilot.config import ApiKeyConfig
+
+    return [
+        ApiKeyConfig(key=CI_KEY, name="ci-bot", scopes=["run"]),
+        ApiKeyConfig(key=APPROVER_KEY, name="kayou", scopes=["run", "approve"]),
+    ]
+
+
 @pytest.fixture
-async def client(db, monkeypatch):
-    """走 ASGI transport 的 HTTP 客户端，不开端口、不起 uvicorn。
-
-    关掉 worker：否则它会把刚入队的任务领走，断言 status == 'queued' 就变成
-    竞态。测 HTTP 层就只测 HTTP 层。
-    """
-    import httpx
-
+async def app_under_test(db, monkeypatch):
+    """装配好的 ASGI app。单独抽出来，是为了让鉴权测试能拿不同的 key 建客户端。"""
     from repopilot.api.app import create_app
     from repopilot.worker import EventBus
 
+    # 关掉 worker：否则它会把刚入队的任务领走，断言 status == 'queued' 就变成
+    # 竞态。测 HTTP 层就只测 HTTP 层。
     monkeypatch.setattr(get_settings(), "enable_worker", False)
+    monkeypatch.setattr(get_settings(), "api_keys", _test_api_keys())
 
     app = create_app()
     app.state.bus = EventBus()
     app.state.worker = None
     app.state.worker_task = None
+    return app
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+
+@pytest.fixture
+async def client(app_under_test):
+    """走 ASGI transport 的 HTTP 客户端，不开端口、不起 uvicorn。
+
+    默认带**全权限**那把 key —— 其余测试关心的是业务逻辑，不该每个用例
+    都重复一遍鉴权。鉴权本身由 `tests/test_auth.py` 单独测。
+    """
+    import httpx
+
+    transport = httpx.ASGITransport(app=app_under_test)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {APPROVER_KEY}"},
+    ) as c:
         yield c
 
 

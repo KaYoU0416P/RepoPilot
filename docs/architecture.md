@@ -13,7 +13,13 @@
 ## 主调用链
 
 ```
-POST /webhooks/github         api/routes.py::github_webhook
+鉴权（除下面两个公开接口外，每个请求都先过这一关）  api/auth.py
+  └─▶ require_scope("run")    APIRouter(dependencies=[...])，不是逐个路由加
+        ├─▶ 没配 key / 没 header / key 不对 → 401 + WWW-Authenticate（对外统一）
+        └─▶ 认出来了但没这个权限位          → 403
+      审批那一个接口另要 require_scope("approve")
+
+POST /webhooks/github         api/routes.py::github_webhook   ← 公开（有自己的 HMAC 验签）
   ├─▶ verify_signature        对 raw bytes 做 HMAC-SHA256，常数时间比较
   │                           失败 → 401，且**什么都不记账**
   ├─▶ claim_delivery          X-GitHub-Delivery 当幂等键，重投直接 200
@@ -22,6 +28,8 @@ POST /webhooks/github         api/routes.py::github_webhook
   ├─▶ RepoCache.path_for      纯函数，算出目标仓库**将来**在缓存里的位置
   │                           （此刻还没 clone —— 见下面 Runner._prepare_repo）
   └─▶ runs_repo.create_run    source='github_issue'，汇入下面同一条链路
+
+GET  /health                  ← 公开（探活不该先要 key）
 
 POST /runs                    api/routes.py::create_run
   └─▶ runs_repo.create_run    INSERT ... status='queued'，立刻返回 202
@@ -49,9 +57,10 @@ Worker.run_forever            worker/worker.py       ← 后台常驻
         ├─▶ evaluate_run              evaluation/metrics.py
         └─▶ transition(PENDING_APPROVAL 或 FAILED)   ← 成功不等于结束
 
-POST /runs/{id}/approval      approvals_repo.decide
+POST /runs/{id}/approval      需要 `approve` 权限位，不是默认的 `run`
   ├─▶ transition(PUBLISHING / REJECTED)   守卫 + 乐观锁 + 交还租约
   └─▶ INSERT approvals                    追加写，保留审批历史
+        decided_by ← **认证出来的身份**，不是请求体（审计字段不能自己填）
 
 Worker._publish_loop           worker/worker.py       ← 和领取循环并排跑
   ├─▶ claim_next_publishing    同一套 SKIP LOCKED + 租约，只是捞 publishing
@@ -321,9 +330,9 @@ publish                   publishing/github.py   另一条 trace，靠 run_id �
 **已完成**：Agent 闭环、6 个工具、Postgres 业务层（队列 + 幂等 + 审批）、
 worker 租约与限流、SSE、GitHub webhook 入口、发布链路（PR + 评论）、
 MCP server、18 个 case 的评测基准集、Prompt 注入防护 + 审计日志、Token 计量与成本、
-OpenTelemetry 链路追踪、DeepSeek provider。**385 passed / 4 skipped。**
+OpenTelemetry 链路追踪、DeepSeek provider。**403 passed / 4 skipped。**
 **`Issue → Run → 审批 → PR` 整条链路已闭环，且能被量化评测。**
 
-**未完成**：API 鉴权、trace 接真后端（现在只导控制台）、
+**未完成**：trace 接真后端（现在只导控制台）、
 容器镜像按目标仓库的 requirements 装依赖（那一步本身也在跑别人的代码）、
 clone 缓存的跨进程锁与容量上限。详见 `docs/progress.md`。
